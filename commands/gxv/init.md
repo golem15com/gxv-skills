@@ -9,27 +9,44 @@ Bootstrap connection to GolemXV coordination server. This command is idempotent 
 
 All server communication uses curl against the REST API, so this works without MCP configured.
 
+## IMPORTANT: Token Safety
+
+**NEVER display raw API keys, session tokens, or full curl responses to the user.** Tokens are sensitive credentials. When you need to show a token value for confirmation, show only the first 8 characters followed by `...`. When running curl commands, capture output into a variable and parse it -- do not let raw JSON responses with tokens stream to the terminal.
+
+For all Bash commands in this skill:
+- Capture curl output: `RESPONSE=$(curl ...)`
+- Parse with lightweight tools: `echo "$RESPONSE" | grep -o '"field":"[^"]*"'` or similar
+- Never echo full tokens -- use `${VAR:0:8}...` for display
+- If a command fails, show the HTTP status or error message, not the full response body
+
 ## Process
 
 ### Step 1: Validate environment variables
 
-Run via Bash:
+Check that both required env vars are set without printing their values:
+
 ```bash
-echo "GXV_API_KEY=${GXV_API_KEY:-(unset)}" && echo "GXV_SERVER_URL=${GXV_SERVER_URL:-(unset)}"
+if [ -z "$GXV_API_KEY" ]; then echo "GXV_API_KEY=(unset)"; else echo "GXV_API_KEY=${GXV_API_KEY:0:8}..."; fi && \
+if [ -z "$GXV_SERVER_URL" ]; then echo "GXV_SERVER_URL=(unset)"; else echo "GXV_SERVER_URL=$GXV_SERVER_URL"; fi
 ```
 
-**If either is empty or unset:**
+**If GXV_API_KEY is empty or unset:**
 ```
-Missing environment variables:
+GXV_API_KEY is not set.
 
   export GXV_API_KEY=gxv_your_key_here
-  export GXV_SERVER_URL=https://your-golemxv-server.com
 
 Get an API key from your GolemXV project settings in the dashboard.
 ```
-STOP here. Do not proceed without both variables set.
+STOP here.
 
-Store `$GXV_SERVER_URL` and `$GXV_API_KEY` for use in subsequent steps.
+**If GXV_SERVER_URL is empty or unset:**
+```
+GXV_SERVER_URL is not set.
+
+  export GXV_SERVER_URL=https://your-golemxv-server.com
+```
+STOP here.
 
 ### Step 2: Check for existing session
 
@@ -37,28 +54,30 @@ Read `.gxv-session` in the current directory (NOT parent directories).
 
 **If file exists:**
 1. Parse the JSON to get `session_token`, `project_slug`, and `server_url`.
-2. Verify the session is still active by calling presence via curl:
+2. Verify the session is still active by calling presence via curl (capture output, don't stream):
    ```bash
-   curl -sf -H "X-API-Key: $GXV_API_KEY" "$GXV_SERVER_URL/_gxv/api/v1/presence"
+   PRESENCE=$(curl -sf -H "X-API-Key: $GXV_API_KEY" "$GXV_SERVER_URL/_gxv/api/v1/presence" 2>&1)
+   echo "HTTP status: $?"
    ```
-3. **If request succeeds:** Display current status summary (skip to Step 8 for presence, then Step 9 for display). No re-check-in needed.
+3. **If request succeeds (exit code 0):** Parse the presence data. Display current status summary (skip to Step 9 for presence, then Step 10 for display). No re-check-in needed.
 4. **If request fails:** Delete `.gxv-session` and proceed to Step 3 to re-initialize.
 
 **If file does not exist:** Proceed to Step 3.
 
 ### Step 3: Fetch GOLEM.yaml from server
 
-Check if `GOLEM.yaml` exists in the current directory.
+Check if `GOLEM.yaml` exists in the current directory using Read tool.
 
 **If GOLEM.yaml exists:** Read it and proceed to Step 4.
 
 **If GOLEM.yaml does not exist:** Fetch project configuration from the server. The API key identifies the project, so the server knows which project config to return:
 
 ```bash
-curl -sf -H "X-API-Key: $GXV_API_KEY" -X POST "$GXV_SERVER_URL/_gxv/api/v1/init"
+YAML_CONTENT=$(curl -sf -H "X-API-Key: $GXV_API_KEY" -X POST "$GXV_SERVER_URL/_gxv/api/v1/init" 2>&1)
+if [ $? -eq 0 ]; then echo "OK: received GOLEM.yaml from server"; else echo "FAIL: $YAML_CONTENT"; fi
 ```
 
-**If request succeeds:** The response is GOLEM.yaml content (text/yaml). Write it to `GOLEM.yaml` in the current directory.
+**If request succeeds:** Use the Write tool to write the YAML content to `GOLEM.yaml` in the current directory. Do NOT echo the content through Bash.
 
 **If request fails:** Display the error and STOP:
 ```
@@ -68,32 +87,38 @@ Check that GXV_API_KEY is valid and GXV_SERVER_URL is reachable.
 
 ### Step 4: Parse GOLEM.yaml
 
-Read `GOLEM.yaml` and extract:
+Read `GOLEM.yaml` with the Read tool and extract:
 - `project.slug` (required)
 - `project.name` (optional, defaults to slug)
 
 ### Step 5: Check in
 
-Register as an active agent via the REST API:
+Register as an active agent via the REST API. Capture the response:
 
 ```bash
-curl -sf -H "X-API-Key: $GXV_API_KEY" -H "Content-Type: application/json" -X POST "$GXV_SERVER_URL/_gxv/api/v1/checkin"
+CHECKIN=$(curl -sf -H "X-API-Key: $GXV_API_KEY" -H "Content-Type: application/json" -X POST "$GXV_SERVER_URL/_gxv/api/v1/checkin" 2>&1)
+echo "exit_code=$?"
 ```
 
-Parse the JSON response to extract:
-- `data.session_token` -- opaque token for subsequent API calls
-- `data.agent_name` -- assigned by the server
-- `data.session_id` -- numeric session ID
+If exit code is 0, parse the JSON response (use the Read tool concept -- the variable has the data). Extract these fields from the `data` object:
+- `session_token` -- opaque token for subsequent API calls (NEVER display fully)
+- `agent_name` -- assigned by the server (safe to display)
+- `session_id` -- numeric session ID (safe to display)
 
-**If checkin fails:** Display the error message from the server and STOP.
+To extract fields safely without showing the full response:
+```bash
+echo "$CHECKIN" | python3 -c "import sys,json; d=json.load(sys.stdin)['data']; print(f\"agent_name={d['agent_name']}\ntoken_prefix={d['session_token'][:8]}\")"
+```
+
+**If checkin fails:** Show only the error message, not the full response body. STOP.
 
 ### Step 6: Persist session
 
-Write `.gxv-session` to the current directory as a JSON file. This is the canonical session schema -- all other `/gxv:` commands depend on these exact fields:
+Use the Write tool to write `.gxv-session` to the current directory as JSON. This is the canonical session schema -- all other `/gxv:` commands depend on these exact fields:
 
 ```json
 {
-  "session_token": "<from checkin response>",
+  "session_token": "<full token from checkin - stored in file, never displayed>",
   "session_id": "<from checkin response>",
   "project_slug": "<from GOLEM.yaml>",
   "project_name": "<from GOLEM.yaml>",
@@ -115,7 +140,7 @@ Read `.gitignore` in the current directory. If `.gxv-session` is not listed, app
 
 Check if `.mcp.json` exists in the current directory.
 
-**If `.mcp.json` does not exist:** Create it:
+**If `.mcp.json` does not exist:** Create it with the Write tool:
 ```json
 {
   "mcpServers": {
@@ -130,31 +155,28 @@ Check if `.mcp.json` exists in the current directory.
 }
 ```
 
-**If `.mcp.json` exists:** Read it and check if the `golemxv` server entry is present. If not, add it (preserve existing entries). If it already exists, leave it unchanged.
+**If `.mcp.json` exists:** Read it and check if the `golemxv` server entry is present under `mcpServers`. If not, add it (preserve existing entries). If it already exists, leave it unchanged.
 
 Set `mcp_just_created` flag if the file was created or modified in this step.
 
 ### Step 9: Get presence info
 
-Call presence to get active agents:
+Call presence to get active agents (capture output):
 ```bash
-curl -sf -H "X-API-Key: $GXV_API_KEY" "$GXV_SERVER_URL/_gxv/api/v1/presence"
+PRESENCE=$(curl -sf -H "X-API-Key: $GXV_API_KEY" "$GXV_SERVER_URL/_gxv/api/v1/presence" 2>&1)
+echo "$PRESENCE" | python3 -c "import sys,json; agents=json.load(sys.stdin)['data']; print(f'active_agents={len(agents)}'); [print(f\"  {a['agent_name']}: {a.get('declared_area','(no scope)')} since {a['started_at']}\") for a in agents]"
 ```
-
-Parse the response to get:
-- Active agent count
-- List of active agents and their scopes
 
 ### Step 10: Display connection summary
 
-Format the output as:
+Output this directly as markdown (do NOT use Bash echo -- just output it as your response text):
 
 ```
 ## Connected to GolemXV
 
 **Project:** [project_name] ([project_slug])
 **Agent:** [agent_name]
-**Session:** [abbreviated session_token, first 8 chars]...
+**Session:** [first 8 chars of session_token]...
 **Server:** [server_url]
 **Checked in at:** [timestamp]
 
@@ -180,4 +202,4 @@ Format the output as:
 
 - **Network errors:** "Could not reach GolemXV server at [url]. Check GXV_SERVER_URL and network connectivity."
 - **Invalid API key:** "API key rejected. Check GXV_API_KEY is correct."
-- **Server errors:** Display the server error message as-is.
+- **Server errors:** Display the error message only, not the full response body.
