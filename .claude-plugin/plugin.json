@@ -1,0 +1,12 @@
+{
+  "name": "gxv-skills",
+  "version": "1.0.0",
+  "description": "GolemXV coordination skills for field agents -- check in, message, claim tasks, and coordinate with other agents",
+  "author": {
+    "name": "Golem15",
+    "url": "https://golem15.com"
+  },
+  "repository": "https://github.com/golem15/gxv-skills",
+  "license": "MIT",
+  "keywords": ["coordination", "multi-agent", "golemxv", "field-agent"]
+}
