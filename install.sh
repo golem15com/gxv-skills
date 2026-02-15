@@ -3,10 +3,12 @@ set -e
 
 REPO="https://github.com/golem15com/gxv-skills.git"
 PLUGIN_DIR="${HOME}/.claude/plugins/gxv-skills"
+COMMANDS_DIR="${HOME}/.claude/commands"
 
 echo "Installing GolemXV skills..."
 echo ""
 
+# Step 1: Clone or update the source repo
 if [ -d "$PLUGIN_DIR" ]; then
     echo "Updating existing installation..."
     cd "$PLUGIN_DIR" && git pull --ff-only
@@ -15,8 +17,20 @@ else
     git clone "$REPO" "$PLUGIN_DIR"
 fi
 
+# Step 2: Symlink commands into Claude Code's auto-discovery path
+mkdir -p "$COMMANDS_DIR"
+
+# Remove existing symlink or directory if present
+if [ -L "$COMMANDS_DIR/gxv" ] || [ -d "$COMMANDS_DIR/gxv" ]; then
+    rm -rf "$COMMANDS_DIR/gxv"
+fi
+
+ln -s "$PLUGIN_DIR/commands/gxv" "$COMMANDS_DIR/gxv"
+
 echo ""
-echo "GolemXV skills installed to: $PLUGIN_DIR"
+echo "GolemXV skills installed!"
+echo "  Source: $PLUGIN_DIR"
+echo "  Commands: $COMMANDS_DIR/gxv -> (symlinked)"
 echo ""
 echo "Next steps:"
 echo "  1. Set your API key:    export GXV_API_KEY=gxv_your_key_here"
