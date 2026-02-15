@@ -1,118 +1,151 @@
 ---
 description: Connect to GolemXV coordination server
-allowed-tools: Read, Write, Bash, Glob, mcp__golemxv__*
+allowed-tools: Read, Write, Bash, Glob
 ---
 
 # /gxv:init
 
 Bootstrap connection to GolemXV coordination server. This command is idempotent -- running it again re-validates the connection and shows current status.
 
+All server communication uses curl against the REST API, so this works without MCP configured.
+
 ## Process
 
-### Step 1: Check for existing session
-
-Read `.gxv-session` in the project root.
-
-**If file exists:**
-1. Parse the JSON to get `session_token` and `project_slug`.
-2. Call `mcp__golemxv__presence` with the `project_slug` to verify the session is still active.
-3. **If active:** Display current status summary and exit. No re-check-in needed.
-4. **If expired or error:** Proceed to Step 2 to re-check-in.
-
-**If file does not exist:** Proceed to Step 2.
-
-### Step 2: Detect GOLEM.yaml
-
-Walk up directories from the current working directory looking for `GOLEM.yaml`:
-1. Check cwd
-2. Check parent directory
-3. Check grandparent directory
-4. Continue up to 5 levels
-
-Use the Glob tool or Read tool to check each level.
-
-**If GOLEM.yaml found:** Read it and proceed to Step 3.
-
-**If GOLEM.yaml not found anywhere:** Offer to create one interactively:
-1. Ask the user for the **project name** (e.g., "My Project").
-2. Ask for the **project slug** (suggest kebab-case derived from the name, e.g., "my-project").
-3. Ask for the **GolemXV server URL**. Default to the `GXV_SERVER_URL` environment variable if set. If not set, ask the user.
-4. Write `GOLEM.yaml` to the current working directory:
-   ```yaml
-   project:
-     name: "[user-provided name]"
-     slug: "[user-provided slug]"
-     server_url: "[user-provided or env URL]"
-   ```
-5. Tell the user: "Created GOLEM.yaml. You can edit it later to add more config."
-6. Continue with the newly created file.
-
-### Step 3: Parse GOLEM.yaml
-
-Extract these fields from the GOLEM.yaml file:
-- `project.slug` (required)
-- `project.name` (optional, defaults to slug)
-- `project.server_url` (optional, used for display)
-
-### Step 4: Validate API key
+### Step 1: Validate environment variables
 
 Run via Bash:
 ```bash
-echo $GXV_API_KEY
+echo "GXV_API_KEY=${GXV_API_KEY:-(unset)}" && echo "GXV_SERVER_URL=${GXV_SERVER_URL:-(unset)}"
 ```
 
-**If empty or unset:**
+**If either is empty or unset:**
 ```
-GXV_API_KEY is not set.
+Missing environment variables:
 
-Set it before connecting:
   export GXV_API_KEY=gxv_your_key_here
+  export GXV_SERVER_URL=https://your-golemxv-server.com
 
-You can get an API key from your GolemXV project settings.
+Get an API key from your GolemXV project settings in the dashboard.
 ```
-STOP here. Do not proceed without a valid API key.
+STOP here. Do not proceed without both variables set.
+
+Store `$GXV_SERVER_URL` and `$GXV_API_KEY` for use in subsequent steps.
+
+### Step 2: Check for existing session
+
+Read `.gxv-session` in the current directory (NOT parent directories).
+
+**If file exists:**
+1. Parse the JSON to get `session_token`, `project_slug`, and `server_url`.
+2. Verify the session is still active by calling presence via curl:
+   ```bash
+   curl -sf -H "X-API-Key: $GXV_API_KEY" "$GXV_SERVER_URL/_gxv/api/v1/presence"
+   ```
+3. **If request succeeds:** Display current status summary (skip to Step 8 for presence, then Step 9 for display). No re-check-in needed.
+4. **If request fails:** Delete `.gxv-session` and proceed to Step 3 to re-initialize.
+
+**If file does not exist:** Proceed to Step 3.
+
+### Step 3: Fetch GOLEM.yaml from server
+
+Check if `GOLEM.yaml` exists in the current directory.
+
+**If GOLEM.yaml exists:** Read it and proceed to Step 4.
+
+**If GOLEM.yaml does not exist:** Fetch project configuration from the server. The API key identifies the project, so the server knows which project config to return:
+
+```bash
+curl -sf -H "X-API-Key: $GXV_API_KEY" -X POST "$GXV_SERVER_URL/_gxv/api/v1/init"
+```
+
+**If request succeeds:** The response is GOLEM.yaml content (text/yaml). Write it to `GOLEM.yaml` in the current directory.
+
+**If request fails:** Display the error and STOP:
+```
+Could not fetch project config from GolemXV server.
+Check that GXV_API_KEY is valid and GXV_SERVER_URL is reachable.
+```
+
+### Step 4: Parse GOLEM.yaml
+
+Read `GOLEM.yaml` and extract:
+- `project.slug` (required)
+- `project.name` (optional, defaults to slug)
 
 ### Step 5: Check in
 
-Call `mcp__golemxv__checkin` with the project slug from GOLEM.yaml.
+Register as an active agent via the REST API:
 
-This validates the API key against the server and returns session information including:
-- `session_token` -- opaque token for subsequent MCP calls
-- `agent_name` -- assigned by the server
+```bash
+curl -sf -H "X-API-Key: $GXV_API_KEY" -H "Content-Type: application/json" -X POST "$GXV_SERVER_URL/_gxv/api/v1/checkin"
+```
+
+Parse the JSON response to extract:
+- `data.session_token` -- opaque token for subsequent API calls
+- `data.agent_name` -- assigned by the server
+- `data.session_id` -- numeric session ID
 
 **If checkin fails:** Display the error message from the server and STOP.
 
 ### Step 6: Persist session
 
-Write `.gxv-session` to the project root as a JSON file. This is the canonical session schema -- all other `/gxv:` commands depend on these exact fields:
+Write `.gxv-session` to the current directory as a JSON file. This is the canonical session schema -- all other `/gxv:` commands depend on these exact fields:
 
 ```json
 {
-  "session_token": "<opaque token from checkin response>",
-  "project_slug": "<from GOLEM.yaml project.slug>",
-  "project_name": "<from GOLEM.yaml project.name>",
-  "agent_name": "<assigned by server during checkin>",
-  "server_url": "<GXV_SERVER_URL value used for this session>",
+  "session_token": "<from checkin response>",
+  "session_id": "<from checkin response>",
+  "project_slug": "<from GOLEM.yaml>",
+  "project_name": "<from GOLEM.yaml>",
+  "agent_name": "<from checkin response>",
+  "server_url": "<GXV_SERVER_URL value>",
   "checked_in_at": "<ISO 8601 timestamp>"
 }
 ```
 
 ### Step 7: Ensure .gxv-session is gitignored
 
-Read `.gitignore` in the project root. If `.gxv-session` is not listed, append it:
+Read `.gitignore` in the current directory. If `.gxv-session` is not listed, append it:
 ```
 # GolemXV session (local, not committed)
 .gxv-session
 ```
 
-### Step 8: Get presence info
+### Step 8: Set up MCP configuration
 
-Call `mcp__golemxv__presence` with the project slug to get:
+Check if `.mcp.json` exists in the current directory.
+
+**If `.mcp.json` does not exist:** Create it:
+```json
+{
+  "mcpServers": {
+    "golemxv": {
+      "type": "http",
+      "url": "${GXV_SERVER_URL}/mcp",
+      "headers": {
+        "X-API-Key": "${GXV_API_KEY}"
+      }
+    }
+  }
+}
+```
+
+**If `.mcp.json` exists:** Read it and check if the `golemxv` server entry is present. If not, add it (preserve existing entries). If it already exists, leave it unchanged.
+
+Set `mcp_just_created` flag if the file was created or modified in this step.
+
+### Step 9: Get presence info
+
+Call presence to get active agents:
+```bash
+curl -sf -H "X-API-Key: $GXV_API_KEY" "$GXV_SERVER_URL/_gxv/api/v1/presence"
+```
+
+Parse the response to get:
 - Active agent count
 - List of active agents and their scopes
-- Any detected conflicts
 
-### Step 9: Display connection summary
+### Step 10: Display connection summary
 
 Format the output as:
 
@@ -136,8 +169,15 @@ Format the output as:
 - `/gxv:done` -- check out when finished
 ```
 
+**If `mcp_just_created` is true**, add this note at the end:
+
+```
+> MCP server configured in .mcp.json. Restart Claude Code for
+> MCP tools to become available to other /gxv: commands.
+```
+
 ## Error Handling
 
 - **Network errors:** "Could not reach GolemXV server at [url]. Check GXV_SERVER_URL and network connectivity."
-- **Invalid API key:** "API key rejected. Check GXV_API_KEY is correct for project [slug]."
+- **Invalid API key:** "API key rejected. Check GXV_API_KEY is correct."
 - **Server errors:** Display the server error message as-is.
