@@ -27,7 +27,8 @@ Check that both required env vars are set without printing their values:
 
 ```bash
 if [ -z "$GXV_API_KEY" ]; then echo "GXV_API_KEY=(unset)"; else echo "GXV_API_KEY=${GXV_API_KEY:0:8}..."; fi && \
-if [ -z "$GXV_SERVER_URL" ]; then echo "GXV_SERVER_URL=(unset)"; else echo "GXV_SERVER_URL=$GXV_SERVER_URL"; fi
+if [ -z "$GXV_SERVER_URL" ]; then echo "GXV_SERVER_URL=(unset)"; else echo "GXV_SERVER_URL=$GXV_SERVER_URL"; fi && \
+echo "GXV_MCP_URL=${GXV_MCP_URL:-(auto: \$GXV_SERVER_URL/mcp)}"
 ```
 
 **If GXV_API_KEY is empty or unset:**
@@ -138,15 +139,24 @@ Read `.gitignore` in the current directory. If `.gxv-session` is not listed, app
 
 ### Step 8: Set up MCP configuration
 
+Determine the MCP server URL. Check for an optional override env var:
+
+```bash
+echo "GXV_MCP_URL=${GXV_MCP_URL:-(unset)}"
+```
+
+- If `GXV_MCP_URL` is set, use that as the MCP URL (for dev setups where MCP runs on a different port)
+- If `GXV_MCP_URL` is not set, use `${GXV_SERVER_URL}/mcp` (production default -- assumes reverse proxy)
+
 Check if `.mcp.json` exists in the current directory.
 
-**If `.mcp.json` does not exist:** Create it with the Write tool:
+**If `.mcp.json` does not exist:** Create it with the Write tool. Use the resolved MCP URL:
 ```json
 {
   "mcpServers": {
     "golemxv": {
       "type": "http",
-      "url": "${GXV_SERVER_URL}/mcp",
+      "url": "<resolved MCP URL>",
       "headers": {
         "X-API-Key": "${GXV_API_KEY}"
       }
@@ -154,6 +164,10 @@ Check if `.mcp.json` exists in the current directory.
   }
 }
 ```
+
+For example:
+- If `GXV_MCP_URL=http://localhost:3100/mcp` → use that literally
+- If `GXV_MCP_URL` unset and `GXV_SERVER_URL=https://app.golemxv.com` → use `${GXV_SERVER_URL}/mcp` (with the env var placeholder, so it stays dynamic)
 
 **If `.mcp.json` exists:** Read it and check if the `golemxv` server entry is present under `mcpServers`. If not, add it (preserve existing entries). If it already exists, leave it unchanged.
 
