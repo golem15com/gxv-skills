@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -e
 
-REPO="https://github.com/golem15/gxv-skills.git"
+REPO="https://github.com/golem15com/gxv-skills.git"
 PLUGIN_DIR="${HOME}/.claude/plugins/gxv-skills"
 
 echo "Installing GolemXV skills..."
