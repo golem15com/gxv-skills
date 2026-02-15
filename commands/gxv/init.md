@@ -60,7 +60,7 @@ Read `.gxv-session` in the current directory (NOT parent directories).
    PRESENCE=$(curl -sf -H "X-API-Key: $GXV_API_KEY" "$GXV_SERVER_URL/_gxv/api/v1/presence" 2>&1)
    echo "HTTP status: $?"
    ```
-3. **If request succeeds (exit code 0):** Parse the presence data. Display current status summary (skip to Step 9 for presence, then Step 10 for display). No re-check-in needed.
+3. **If request succeeds (exit code 0):** Parse the presence data. Then still run Step 7 (.gitignore) and Step 8 (.mcp.json setup) to ensure config files exist, then skip to Step 10 for display. No re-check-in needed.
 4. **If request fails:** Delete `.gxv-session` and proceed to Step 3 to re-initialize.
 
 **If file does not exist:** Proceed to Step 3.
