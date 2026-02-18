@@ -23,11 +23,11 @@ For all Bash commands in this skill:
 
 ### Step 1: Validate environment variables
 
-Check that both required env vars are set without printing their values:
+Check that the API key is set and apply the default server URL if not overridden:
 
 ```bash
 if [ -z "$GXV_API_KEY" ]; then echo "GXV_API_KEY=(unset)"; else echo "GXV_API_KEY=${GXV_API_KEY:0:8}..."; fi && \
-if [ -z "$GXV_SERVER_URL" ]; then echo "GXV_SERVER_URL=(unset)"; else echo "GXV_SERVER_URL=$GXV_SERVER_URL"; fi && \
+if [ -z "$GXV_SERVER_URL" ]; then export GXV_SERVER_URL=https://golemxv.com && echo "GXV_SERVER_URL=$GXV_SERVER_URL (default)"; else echo "GXV_SERVER_URL=$GXV_SERVER_URL (custom)"; fi && \
 echo "GXV_MCP_URL=${GXV_MCP_URL:-(auto: \$GXV_SERVER_URL/mcp)}"
 ```
 
@@ -41,27 +41,31 @@ Get an API key from your GolemXV project settings in the dashboard.
 ```
 STOP here.
 
-**If GXV_SERVER_URL is empty or unset:**
+### Step 2: Generate instance ID and check for existing session
+
+First, generate a unique instance ID for this Claude Code session (if not already set). This ID distinguishes concurrent consoles sharing the same working directory:
+
+```bash
+if [ -z "$GXV_INSTANCE_ID" ]; then
+  export GXV_INSTANCE_ID=$(head -c 8 /dev/urandom | xxd -p)
+  echo "GXV_INSTANCE_ID=$GXV_INSTANCE_ID (new)"
+else
+  echo "GXV_INSTANCE_ID=$GXV_INSTANCE_ID (existing)"
+fi
 ```
-GXV_SERVER_URL is not set.
 
-  export GXV_SERVER_URL=https://your-golemxv-server.com
-```
-STOP here.
-
-### Step 2: Check for existing session
-
-Read `.gxv-session` in the current directory (NOT parent directories).
+Now read `.gxv-session` in the current directory (NOT parent directories).
 
 **If file exists:**
-1. Parse the JSON to get `session_token`, `project_slug`, and `server_url`.
-2. Verify the session is still active by calling presence via curl (capture output, don't stream):
+1. Parse the JSON to get `session_token`, `project_slug`, `server_url`, and `instance_id`.
+2. **If `instance_id` in the file matches `$GXV_INSTANCE_ID`:** This is our own session from a previous `/gxv:init` run in the same console. Verify it is still active by calling presence via curl (capture output, don't stream):
    ```bash
    PRESENCE=$(curl -sf -H "X-API-Key: $GXV_API_KEY" "$GXV_SERVER_URL/_gxv/api/v1/presence" 2>&1)
    echo "HTTP status: $?"
    ```
-3. **If request succeeds (exit code 0):** Parse the presence data. Then still run Step 7 (.gitignore) and Step 8 (.mcp.json setup) to ensure config files exist, then skip to Step 10 for display. No re-check-in needed.
-4. **If request fails:** Delete `.gxv-session` and proceed to Step 3 to re-initialize.
+   - **If request succeeds (exit code 0):** Parse the presence data. Then still run Step 7 (.gitignore) and Step 8 (.mcp.json setup) to ensure config files exist, then skip to Step 10 for display. No re-check-in needed.
+   - **If request fails:** Delete `.gxv-session` and proceed to Step 3 to re-initialize.
+3. **If `instance_id` does not match (or is missing):** Another console owns this session. Proceed to Step 3 to create a new session for this console. Do NOT delete the existing file yet -- Step 6 will overwrite it.
 
 **If file does not exist:** Proceed to Step 3.
 
@@ -125,6 +129,7 @@ Use the Write tool to write `.gxv-session` to the current directory as JSON. Thi
   "project_name": "<from GOLEM.yaml>",
   "agent_name": "<from checkin response>",
   "server_url": "<GXV_SERVER_URL value>",
+  "instance_id": "<GXV_INSTANCE_ID value>",
   "checked_in_at": "<ISO 8601 timestamp>"
 }
 ```
@@ -146,7 +151,7 @@ echo "GXV_MCP_URL=${GXV_MCP_URL:-(unset)}"
 ```
 
 - If `GXV_MCP_URL` is set, use that as the MCP URL (for dev setups where MCP runs on a different port)
-- If `GXV_MCP_URL` is not set, use `${GXV_SERVER_URL}/mcp` (production default -- assumes reverse proxy)
+- If `GXV_MCP_URL` is not set, use `${GXV_SERVER_URL}/mcp` (defaults to `https://golemxv.com/mcp` since GXV_SERVER_URL defaults to `https://golemxv.com`)
 
 Check if `.mcp.json` exists in the current directory.
 
@@ -167,7 +172,8 @@ Check if `.mcp.json` exists in the current directory.
 
 For example:
 - If `GXV_MCP_URL=http://localhost:3100/mcp` → use that literally
-- If `GXV_MCP_URL` unset and `GXV_SERVER_URL=https://app.golemxv.com` → use `${GXV_SERVER_URL}/mcp` (with the env var placeholder, so it stays dynamic)
+- If `GXV_MCP_URL` unset and `GXV_SERVER_URL=https://golemxv.com` (default) → use `https://golemxv.com/mcp`
+- If `GXV_MCP_URL` unset and `GXV_SERVER_URL=https://custom.example.com` (custom) → use `https://custom.example.com/mcp`
 
 **If `.mcp.json` exists:** Read it and check if the `golemxv` server entry is present under `mcpServers`. If not, add it (preserve existing entries). If it already exists, leave it unchanged.
 
