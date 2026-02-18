@@ -87,13 +87,16 @@ STOP here.
 
 ### Step 3: Update scope and check conflicts
 
-Update scope via the status endpoint. The response includes conflict detection automatically:
+Update scope via the status endpoint. **IMPORTANT:** Use a quoted heredoc (`<<'ENDJSON'`) for the payload to avoid shell escaping issues:
 ```bash
-SCOPE_RESULT=$(curl -sf -w "\n%{http_code}" \
+SCOPE_RESULT=$(curl -s -w "\n%{http_code}" \
   -H "X-API-Key: $GXV_API_KEY" \
   -H "Content-Type: application/json" \
   -X POST "SERVER_URL/_gxv/api/v1/status" \
-  -d '{"session_token":"SESSION_TOKEN","declared_area":"AREA","declared_files":FILES_JSON}' 2>/dev/null)
+  -d @- <<'ENDJSON' 2>/dev/null
+{"session_token":"SESSION_TOKEN","declared_area":"AREA","declared_files":FILES_JSON}
+ENDJSON
+)
 HTTP_CODE=$(echo "$SCOPE_RESULT" | tail -1)
 BODY=$(echo "$SCOPE_RESULT" | sed '$d')
 echo "scope_status=$HTTP_CODE"

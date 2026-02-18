@@ -126,18 +126,21 @@ Send one: `/gxv:msg "your message"`
 
 ### Step 3b: Send message
 
-Send a message via REST API:
+Send a message via REST API. **IMPORTANT:** Use a quoted heredoc (`<<'ENDJSON'`) for the payload to avoid shell escaping issues with `!`, `'`, and other special characters in message content:
 ```bash
-SEND_RESULT=$(curl -sf -w "\n%{http_code}" \
+SEND_RESULT=$(curl -s -w "\n%{http_code}" \
   -H "X-API-Key: $GXV_API_KEY" \
   -H "Content-Type: application/json" \
   -X POST "SERVER_URL/_gxv/api/v1/messages" \
-  -d '{"session_token":"SESSION_TOKEN","content":"MESSAGE_CONTENT","to":"RECIPIENT"}' 2>/dev/null)
+  -d @- <<'ENDJSON' 2>/dev/null
+{"session_token":"SESSION_TOKEN","content":"MESSAGE_CONTENT","to":"RECIPIENT"}
+ENDJSON
+)
 HTTP_CODE=$(echo "$SEND_RESULT" | tail -1)
 BODY=$(echo "$SEND_RESULT" | sed '$d')
 echo "send_status=$HTTP_CODE"
 ```
-(Replace `SERVER_URL`, `SESSION_TOKEN`, `MESSAGE_CONTENT`, and `RECIPIENT` with literal values. Use the agent name for DMs or `broadcast` for broadcasts. Escape any double quotes in the message content with backslash.)
+(Replace `SERVER_URL`, `SESSION_TOKEN`, `MESSAGE_CONTENT`, and `RECIPIENT` with literal values. Use the agent name for DMs or `broadcast` for broadcasts. JSON-escape the message content before inserting: replace `\` with `\\`, `"` with `\"`, newlines with `\n`.)
 
 ### Step 4: Display confirmation
 

@@ -91,31 +91,40 @@ Perform all three operations in a single Bash invocation. Compose the departure 
 
 Run all three API calls together:
 ```bash
-# Send departure broadcast
-MSG_CODE=$(curl -sf -o /dev/null -w "%{http_code}" \
+# Send departure broadcast (use heredoc to avoid shell escaping issues with !, ', etc.)
+MSG_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
   -H "X-API-Key: $GXV_API_KEY" \
   -H "Content-Type: application/json" \
   -X POST "SERVER_URL/_gxv/api/v1/messages" \
-  -d '{"session_token":"SESSION_TOKEN","content":"DEPARTURE_MESSAGE","to":"broadcast"}' 2>/dev/null)
+  -d @- <<'ENDJSON' 2>/dev/null
+{"session_token":"SESSION_TOKEN","content":"DEPARTURE_MESSAGE","to":"broadcast"}
+ENDJSON
+)
 echo "departure_broadcast=$MSG_CODE"
 
 # Clear scope
-SCOPE_CODE=$(curl -sf -o /dev/null -w "%{http_code}" \
+SCOPE_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
   -H "X-API-Key: $GXV_API_KEY" \
   -H "Content-Type: application/json" \
   -X POST "SERVER_URL/_gxv/api/v1/status" \
-  -d '{"session_token":"SESSION_TOKEN","declared_area":"","declared_files":[]}' 2>/dev/null)
+  -d @- <<'ENDJSON2' 2>/dev/null
+{"session_token":"SESSION_TOKEN","declared_area":"","declared_files":[]}
+ENDJSON2
+)
 echo "clear_scope=$SCOPE_CODE"
 
 # Checkout
-CHECKOUT_CODE=$(curl -sf -o /dev/null -w "%{http_code}" \
+CHECKOUT_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
   -H "X-API-Key: $GXV_API_KEY" \
   -H "Content-Type: application/json" \
   -X POST "SERVER_URL/_gxv/api/v1/checkout" \
-  -d '{"session_token":"SESSION_TOKEN"}' 2>/dev/null)
+  -d @- <<'ENDJSON3' 2>/dev/null
+{"session_token":"SESSION_TOKEN"}
+ENDJSON3
+)
 echo "checkout=$CHECKOUT_CODE"
 ```
-(Replace `SERVER_URL`, `SESSION_TOKEN`, and `DEPARTURE_MESSAGE` with literal values. Escape any double quotes in the departure message with backslash.)
+(Replace `SERVER_URL`, `SESSION_TOKEN`, and `DEPARTURE_MESSAGE` with literal values. JSON-escape the departure message before inserting: replace `\` with `\\`, `"` with `\"`, newlines with `\n`.)
 
 ### Step 4: Stop heartbeat and delete session + inbox files
 
