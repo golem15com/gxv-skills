@@ -26,7 +26,7 @@ For all Bash commands in this skill:
 Run the batch-check script that validates the entire environment in a single pass:
 
 ```bash
-RESULT=$(bash "$(pwd)/gxv-skills/scripts/gxv-init-check.sh" "$(pwd)" "${GXV_SERVER_URL:-https://golemxv.com}" 2>/dev/null)
+RESULT=$(bash ~/.claude/plugins/gxv-skills/scripts/gxv-init-check.sh "$(pwd)" "${GXV_SERVER_URL:-https://golemxv.com}" 2>/dev/null)
 echo "$RESULT"
 ```
 
