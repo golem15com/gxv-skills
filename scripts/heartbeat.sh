@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# GXV Heartbeat — keeps agent session alive and polls for messages
+# GXV Heartbeat — keeps agent session alive and polls for messages/presence
 #
 # Usage: heartbeat.sh <session-file> [interval-seconds]
 #
@@ -10,7 +10,7 @@
 # Each cycle:
 #   1. Sends heartbeat POST to keep session alive
 #   2. Polls GET /messages for new messages since last poll
-#   3. Writes inbox file (.gxv/inbox-<SID>.json) atomically
+#   3. Polls GET /presence and writes .gxv/presence-<SID>.json
 #
 # Exits automatically when:
 #   - Session file is deleted (agent checked out)
@@ -30,6 +30,7 @@ SESSION_BASENAME="$(basename "$SESSION_FILE" .json)"
 SID="${SESSION_BASENAME#session-}"
 PIDFILE="$GXV_DIR/heartbeat-${SID}.pid"
 INBOX_FILE="$GXV_DIR/inbox-${SID}.json"
+PRESENCE_FILE="$GXV_DIR/presence-${SID}.json"
 
 # Validate
 if [ ! -f "$SESSION_FILE" ]; then
@@ -143,6 +144,49 @@ os.replace(tmp_file, inbox_file)
 " "$POLL_TS" "$AGENT_NAME" "$INBOX_FILE" 2>/dev/null || true
 
     LAST_POLLED="$POLL_TS"
+  fi
+
+  # --- 3. Poll presence and cache locally ---
+  PRESENCE_RESPONSE=$(curl -sf \
+    -H "X-API-Key: $API_KEY" \
+    "$SERVER/_gxv/api/v1/presence?project_slug=$PROJECT_SLUG" 2>/dev/null) || true
+
+  if [ -n "$PRESENCE_RESPONSE" ]; then
+    PRESENCE_TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    echo "$PRESENCE_RESPONSE" | python3 -c "
+import json, sys, os
+
+response = sys.stdin.read()
+poll_ts = sys.argv[1]
+agent_name = sys.argv[2]
+presence_file = sys.argv[3]
+tmp_file = presence_file + '.tmp'
+
+try:
+    agents = json.loads(response).get('data', [])
+except (json.JSONDecodeError, KeyError):
+    sys.exit(0)
+
+# Build compact presence cache
+cache = {
+    'last_polled_at': poll_ts,
+    'self': agent_name,
+    'agents': []
+}
+
+for a in agents:
+    cache['agents'].append({
+        'agent_name': a.get('agent_name', ''),
+        'declared_area': a.get('declared_area', ''),
+        'declared_files': a.get('declared_files') or [],
+        'started_at': a.get('started_at', ''),
+    })
+
+# Atomic write
+with open(tmp_file, 'w') as f:
+    json.dump(cache, f, indent=2)
+os.replace(tmp_file, presence_file)
+" "$PRESENCE_TS" "$AGENT_NAME" "$PRESENCE_FILE" 2>/dev/null || true
   fi
 
   sleep "$INTERVAL"

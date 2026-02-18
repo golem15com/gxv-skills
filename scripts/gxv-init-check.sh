@@ -137,10 +137,11 @@ if session_data and result["session"]["exists"]:
         # Delete the stale session file
         try:
             os.remove(session_file)
-            # Also remove matching inbox file
-            inbox_file = os.path.join(project_dir, ".gxv", f"inbox-{stable_ppid}.json")
-            if os.path.exists(inbox_file):
-                os.remove(inbox_file)
+            # Also remove matching inbox and presence files
+            for suffix in [f"inbox-{stable_ppid}.json", f"presence-{stable_ppid}.json"]:
+                stale_file = os.path.join(project_dir, ".gxv", suffix)
+                if os.path.exists(stale_file):
+                    os.remove(stale_file)
         except OSError:
             pass
         result["session"]["exists"] = False
@@ -161,7 +162,7 @@ for session_path in glob.glob(os.path.join(gxv_dir, "session-*.json")):
             os.remove(session_path)
             # Remove matching inbox, heartbeat PID, and heartbeat log files
             other_basename = os.path.basename(session_path).replace("session-", "").replace(".json", "")
-            for pattern in [f"inbox-{other_basename}.json", f"heartbeat-{other_basename}.pid", f"heartbeat-{other_basename}.log"]:
+            for pattern in [f"inbox-{other_basename}.json", f"presence-{other_basename}.json", f"heartbeat-{other_basename}.pid", f"heartbeat-{other_basename}.log"]:
                 other_file = os.path.join(gxv_dir, pattern)
                 if os.path.exists(other_file):
                     # Kill heartbeat process if removing its PID file

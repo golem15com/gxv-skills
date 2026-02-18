@@ -9,6 +9,16 @@
             "command": "${CLAUDE_PLUGIN_ROOT}/scripts/gxv-block-direct-mcp.sh"
           }
         ]
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/gxv-scope-guard.sh",
+            "timeout": 3000
+          }
+        ]
       }
     ],
     "UserPromptSubmit": [

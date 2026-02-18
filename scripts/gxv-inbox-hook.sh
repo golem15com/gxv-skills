@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# GXV Inbox Hook — reads local inbox files and outputs unread messages
+# GXV Inbox Hook — injects scope awareness and unread messages into context
 #
 # Designed for Claude Code UserPromptSubmit hook.
-# - NO network calls — reads only local .gxv/inbox-*.json files
-# - Fast-path exit when no .gxv/ dir or no inbox files
+# - NO network calls — reads only local .gxv/ files
+# - Fast-path exit when no .gxv/ dir
 # - Outputs plain text to stdout (injected into Claude context)
-# - Updates last_seen_at after delivery
+# - Line 1: [GXV] Scopes summary (always, when presence cache available)
+# - Line 2+: Unread messages (only when new messages exist)
+# - Updates last_seen_at after message delivery
 #
 # Uses $CLAUDE_PROJECT_DIR to find .gxv/ directory.
 
@@ -18,26 +20,62 @@ GXV_DIR="$PROJECT_DIR/.gxv"
 # Fast-path: no .gxv directory → nothing to do
 [ -d "$GXV_DIR" ] || exit 0
 
-# Collect all inbox files
-INBOX_FILES=("$GXV_DIR"/inbox-*.json)
-
-# Fast-path: no inbox files (glob didn't match)
-[ -e "${INBOX_FILES[0]}" ] || exit 0
-
-# Use python3 to read all inbox files, collect unread messages, update last_seen_at
+# Use python3 for all file reads and output formatting
 python3 -c "
 import json, os, sys, glob
 from datetime import datetime, timezone
 
 gxv_dir = '$GXV_DIR'
+output_lines = []
+
+# ── 1. Scope summary from presence cache ──────────────────────────
+presence_pattern = os.path.join(gxv_dir, 'presence-*.json')
+presence_files = glob.glob(presence_pattern)
+
+self_agent = ''
+scope_parts = []
+
+if presence_files:
+    # Use most recently modified presence file
+    presence_files.sort(key=lambda f: os.path.getmtime(f), reverse=True)
+    try:
+        with open(presence_files[0]) as f:
+            presence = json.load(f)
+
+        # Check staleness — skip if older than 2 minutes
+        polled_at = presence.get('last_polled_at', '')
+        self_agent = presence.get('self', '')
+        stale = False
+        if polled_at:
+            try:
+                polled_dt = datetime.fromisoformat(polled_at.replace('Z', '+00:00'))
+                age = (datetime.now(timezone.utc) - polled_dt).total_seconds()
+                if age > 120:
+                    stale = True
+            except (ValueError, TypeError):
+                stale = True
+
+        if not stale:
+            agents = presence.get('agents', [])
+            for a in agents:
+                name = a.get('agent_name', '?')
+                area = a.get('declared_area', '')
+                if name == self_agent:
+                    scope_parts.append(f'{name}(YOU)->{area or \"(none)\"}')
+                else:
+                    scope_parts.append(f'{name}->{area or \"(none)\"}')
+
+            if scope_parts:
+                output_lines.append(f'[GXV] Scopes: {', '.join(scope_parts)}')
+    except (json.JSONDecodeError, IOError, KeyError):
+        pass
+
+# ── 2. Unread messages from inbox files ───────────────────────────
 inbox_pattern = os.path.join(gxv_dir, 'inbox-*.json')
 inbox_files = glob.glob(inbox_pattern)
 
-if not inbox_files:
-    sys.exit(0)
-
 unread = []
-agent_name = ''
+agent_name = self_agent  # prefer presence-derived agent name
 
 for inbox_file in inbox_files:
     try:
@@ -46,7 +84,6 @@ for inbox_file in inbox_files:
     except (json.JSONDecodeError, IOError):
         continue
 
-    # Extract agent_name from inbox data (set by heartbeat)
     file_agent = data.get('agent_name', '')
     if file_agent and not agent_name:
         agent_name = file_agent
@@ -55,7 +92,6 @@ for inbox_file in inbox_files:
     messages = data.get('messages', [])
 
     # Defense-in-depth: filter out DMs between other agents
-    # (heartbeat should already exclude these, but handle old inbox files)
     if agent_name:
         messages = [m for m in messages
             if m.get('recipient', 'broadcast') == 'broadcast'
@@ -86,34 +122,30 @@ for inbox_file in inbox_files:
     except IOError:
         pass
 
-if not unread:
-    sys.exit(0)
+if unread:
+    unread.sort(key=lambda m: m.get('created_at', ''))
+    count = len(unread)
+    output_lines.append(f'[GolemXV] {count} new message(s):')
+    output_lines.append('')
 
-# Sort by created_at
-unread.sort(key=lambda m: m.get('created_at', ''))
+    for msg in unread:
+        created = msg.get('created_at', '')
+        time_str = created[11:16] if len(created) >= 16 else '??:??'
+        sender = msg.get('sender', 'unknown')
+        recipient = msg.get('recipient', 'broadcast')
+        content = msg.get('content', '')
 
-# Format output
-count = len(unread)
-print(f'[GolemXV] {count} new message(s):')
-print()
+        if recipient == 'broadcast' or not recipient:
+            output_lines.append(f'  [{time_str}] {sender} (broadcast): {content}')
+        elif agent_name and (recipient == agent_name or msg.get('recipient_name', '') == agent_name):
+            output_lines.append(f'  [{time_str}] {sender} -> YOU: {content}')
+        else:
+            output_lines.append(f'  [{time_str}] {sender} -> {recipient}: {content}')
 
-for msg in unread:
-    created = msg.get('created_at', '')
-    # Extract HH:MM from ISO timestamp
-    time_str = created[11:16] if len(created) >= 16 else '??:??'
-    sender = msg.get('sender', 'unknown')
-    recipient = msg.get('recipient', 'broadcast')
-    content = msg.get('content', '')
+    output_lines.append('')
+    output_lines.append('Reply: /gxv:msg \"your reply\" | DM: /gxv:msg --to agent-name \"message\"')
 
-    if recipient == 'broadcast' or not recipient:
-        print(f'  [{time_str}] {sender} (broadcast): {content}')
-    elif agent_name and (recipient == agent_name or msg.get('recipient_name', '') == agent_name):
-        # DM addressed to this agent — highlight with -> YOU
-        print(f'  [{time_str}] {sender} -> YOU: {content}')
-    else:
-        # DM from this agent to someone else, or unknown recipient
-        print(f'  [{time_str}] {sender} -> {recipient}: {content}')
-
-print()
-print('Reply: /gxv:msg \"your reply\" | DM: /gxv:msg --to agent-name \"message\"')
+# ── Output ────────────────────────────────────────────────────────
+if output_lines:
+    print('\n'.join(output_lines))
 " 2>/dev/null || true
