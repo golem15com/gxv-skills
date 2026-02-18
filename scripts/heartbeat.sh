@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
-# GXV Heartbeat — keeps agent session alive by sending periodic heartbeats
+# GXV Heartbeat — keeps agent session alive and polls for messages
 #
 # Usage: heartbeat.sh <session-file> [interval-seconds]
 #
-# Reads session_token and server_url from the session JSON file.
-# Requires GXV_API_KEY environment variable.
+# Reads session_token, agent_name, project_slug, and server_url from the
+# session JSON file. Requires GXV_API_KEY environment variable.
 # Writes PID to .gxv/heartbeat.pid (alongside session file).
+#
+# Each cycle:
+#   1. Sends heartbeat POST to keep session alive
+#   2. Polls GET /messages for new messages since last poll
+#   3. Writes inbox file (.gxv/inbox-<SID>.json) atomically
 #
 # Exits automatically when:
 #   - Session file is deleted (agent checked out)
@@ -18,7 +23,13 @@ INTERVAL="${2:-30}"
 
 # Resolve to absolute path
 SESSION_FILE="$(cd "$(dirname "$SESSION_FILE")" && pwd)/$(basename "$SESSION_FILE")"
-PIDFILE="$(dirname "$SESSION_FILE")/heartbeat.pid"
+GXV_DIR="$(dirname "$SESSION_FILE")"
+PIDFILE="$GXV_DIR/heartbeat.pid"
+
+# Extract session ID from filename (e.g., session-1181675.json → 1181675)
+SESSION_BASENAME="$(basename "$SESSION_FILE" .json)"
+SID="${SESSION_BASENAME#session-}"
+INBOX_FILE="$GXV_DIR/inbox-${SID}.json"
 
 # Validate
 if [ ! -f "$SESSION_FILE" ]; then
@@ -28,20 +39,34 @@ fi
 
 API_KEY="${GXV_API_KEY:?GXV_API_KEY environment variable is required}"
 
-# Parse session
+# Parse session fields
 TOKEN=$(python3 -c "import json; print(json.load(open('$SESSION_FILE'))['session_token'])")
 SERVER=$(python3 -c "import json; print(json.load(open('$SESSION_FILE'))['server_url'])")
+AGENT_NAME=$(python3 -c "import json; print(json.load(open('$SESSION_FILE'))['agent_name'])")
+PROJECT_SLUG=$(python3 -c "import json; print(json.load(open('$SESSION_FILE'))['project_slug'])")
 
 # Write PID file
 echo $$ > "$PIDFILE"
 trap 'rm -f "$PIDFILE"' EXIT
 
-# Heartbeat loop
+# Initialize last_polled_at from existing inbox file, or empty
+LAST_POLLED=""
+if [ -f "$INBOX_FILE" ]; then
+  LAST_POLLED=$(python3 -c "
+import json, sys
+try:
+    data = json.load(open('$INBOX_FILE'))
+    print(data.get('last_polled_at', ''))
+except: pass
+" 2>/dev/null) || true
+fi
+
+# Heartbeat + message poll loop
 while true; do
   # Exit if session file was deleted (checkout)
   [ -f "$SESSION_FILE" ] || break
 
-  # Send heartbeat
+  # --- 1. Send heartbeat ---
   HTTP_CODE=$(curl -sf -o /dev/null -w "%{http_code}" \
     -H "X-API-Key: $API_KEY" \
     -H "Content-Type: application/json" \
@@ -49,7 +74,69 @@ while true; do
     -d "{\"session_token\":\"$TOKEN\"}" 2>/dev/null) || true
 
   # Exit if session is gone server-side
-  [ "$HTTP_CODE" = "404" ] || [ "$HTTP_CODE" = "401" ] && break
+  if [ "$HTTP_CODE" = "404" ] || [ "$HTTP_CODE" = "401" ]; then
+    break
+  fi
+
+  # --- 2. Poll for messages ---
+  MESSAGES_URL="$SERVER/_gxv/api/v1/messages?project_slug=$PROJECT_SLUG&limit=20"
+  if [ -n "$LAST_POLLED" ]; then
+    MESSAGES_URL="${MESSAGES_URL}&since=${LAST_POLLED}"
+  fi
+
+  MSG_RESPONSE=$(curl -sf \
+    -H "X-API-Key: $API_KEY" \
+    "$MESSAGES_URL" 2>/dev/null) || true
+
+  if [ -n "$MSG_RESPONSE" ]; then
+    # Update inbox file atomically via python (pipe response via stdin to avoid quoting issues)
+    POLL_TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    echo "$MSG_RESPONSE" | python3 -c "
+import json, sys, os
+
+response = sys.stdin.read()
+poll_ts = sys.argv[1]
+agent_name = sys.argv[2]
+inbox_file = sys.argv[3]
+tmp_file = inbox_file + '.tmp'
+
+try:
+    new_msgs = json.loads(response).get('data', [])
+except (json.JSONDecodeError, KeyError):
+    sys.exit(0)
+
+# Filter out own messages
+new_msgs = [m for m in new_msgs if m.get('sender', '') != agent_name]
+
+# Load existing inbox
+existing = {'last_polled_at': '', 'last_seen_at': '', 'agent_name': agent_name, 'messages': []}
+if os.path.exists(inbox_file):
+    try:
+        with open(inbox_file) as f:
+            existing = json.load(f)
+    except: pass
+
+# Merge: add new messages, deduplicate by id
+existing_ids = {m.get('id') for m in existing.get('messages', [])}
+for m in new_msgs:
+    if m.get('id') not in existing_ids:
+        existing['messages'].append(m)
+        existing_ids.add(m.get('id'))
+
+# Cap at 50 messages (keep newest)
+existing['messages'] = sorted(existing['messages'], key=lambda m: m.get('created_at', ''))[-50:]
+
+existing['last_polled_at'] = poll_ts
+existing['agent_name'] = agent_name
+
+# Atomic write
+with open(tmp_file, 'w') as f:
+    json.dump(existing, f, indent=2)
+os.replace(tmp_file, inbox_file)
+" "$POLL_TS" "$AGENT_NAME" "$INBOX_FILE" 2>/dev/null || true
+
+    LAST_POLLED="$POLL_TS"
+  fi
 
   sleep "$INTERVAL"
 done

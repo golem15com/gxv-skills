@@ -77,9 +77,9 @@ Call `mcp__golemxv__scope_update` with:
 
 Call `mcp__golemxv__checkout` with the `session_token`.
 
-### Step 6: Stop heartbeat and delete session file
+### Step 6: Stop heartbeat and delete session + inbox files
 
-Stop the background heartbeat process and clean up session files:
+Stop the background heartbeat process and clean up session and inbox files:
 ```bash
 # Stop heartbeat
 if [ -f ".gxv/heartbeat.pid" ]; then
@@ -87,8 +87,9 @@ if [ -f ".gxv/heartbeat.pid" ]; then
   rm -f ".gxv/heartbeat.pid"
 fi
 
-# Delete session
+# Delete session and inbox files
 rm -f ".gxv/session-$PPID.json"
+rm -f ".gxv/inbox-$PPID.json"
 ```
 
 ### Step 7: Display checkout summary

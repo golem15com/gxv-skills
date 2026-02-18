@@ -93,6 +93,9 @@ Check if `.gxv/session-<PPID>.json` exists (this instance's session file) using 
    ")
      if [ "$ACTIVE" = "no" ]; then
        echo "Removing stale session: $f (agent $AGENT no longer active)"
+       # Remove matching inbox file too
+       STALE_SID=$(basename "$f" .json | sed 's/session-//')
+       rm -f ".gxv/inbox-${STALE_SID}.json"
        rm "$f"
      else
        echo "Active session: $f (agent $AGENT)"
@@ -275,7 +278,10 @@ Output this directly as markdown (do NOT use Bash echo -- just output it as your
 - `/gxv:scope [area] [files...]` -- declare your work scope
 - `/gxv:status` -- check coordination status
 - `/gxv:tasks` -- see available tasks
+- `/gxv:msg` -- view inbox or send messages
 - `/gxv:done` -- check out when finished
+
+Messages from other agents are delivered automatically on each prompt.
 ```
 
 **If `mcp_just_created` is true**, add this note at the end:

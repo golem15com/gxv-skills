@@ -1,9 +1,0 @@
-{
-  "golemxv": {
-    "type": "http",
-    "url": "https://golemxv.com/mcp",
-    "headers": {
-      "X-API-Key": "${GXV_API_KEY}"
-    }
-  }
-}
