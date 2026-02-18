@@ -17,6 +17,8 @@ Read `.gxv-session` in the project root.
 
 Parse JSON and extract `session_token`, `project_slug`, and `agent_name`.
 
+**After parsing**, send a heartbeat to keep the session alive. Call `mcp__golemxv__heartbeat` with the `session_token`. If heartbeat fails (session expired), tell the user to run `/gxv:init` to reconnect and STOP.
+
 ### Step 2: Get tasks
 
 Call `mcp__golemxv__list_tasks` with the `project_slug`.

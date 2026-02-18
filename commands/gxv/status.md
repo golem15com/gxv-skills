@@ -23,6 +23,8 @@ STOP here.
 
 **If found:** Parse JSON and extract `session_token`, `project_slug`, `project_name`, `agent_name`, `checked_in_at`.
 
+**After parsing**, send a heartbeat to keep the session alive. Call `mcp__golemxv__heartbeat` with the `session_token`. If heartbeat fails (session expired), tell the user to run `/gxv:init` to reconnect and STOP.
+
 ### Step 2: Get presence
 
 Call `mcp__golemxv__presence` with the `project_slug`.

@@ -27,6 +27,9 @@ fi
 
 ln -s "$PLUGIN_DIR/commands/gxv" "$COMMANDS_DIR/gxv"
 
+# Step 3: Ensure scripts are executable
+chmod +x "$PLUGIN_DIR/scripts/"*.sh 2>/dev/null || true
+
 echo ""
 echo "GolemXV skills installed!"
 echo "  Source: $PLUGIN_DIR"

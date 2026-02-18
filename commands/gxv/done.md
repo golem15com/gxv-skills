@@ -72,11 +72,18 @@ Call `mcp__golemxv__scope_update` with:
 
 Call `mcp__golemxv__checkout` with the `session_token`.
 
-### Step 6: Delete session file
+### Step 6: Stop heartbeat and delete session file
 
-Delete the `.gxv-session` file:
+Stop the background heartbeat process and clean up session files:
 ```bash
-rm .gxv-session
+# Stop heartbeat
+if [ -f ".gxv/heartbeat.pid" ]; then
+  kill $(cat ".gxv/heartbeat.pid") 2>/dev/null || true
+  rm -f ".gxv/heartbeat.pid"
+fi
+
+# Delete session
+rm -f .gxv-session
 ```
 
 ### Step 7: Display checkout summary

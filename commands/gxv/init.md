@@ -63,7 +63,7 @@ Now read `.gxv-session` in the current directory (NOT parent directories).
    PRESENCE=$(curl -sf -H "X-API-Key: $GXV_API_KEY" "$GXV_SERVER_URL/_gxv/api/v1/presence" 2>&1)
    echo "HTTP status: $?"
    ```
-   - **If request succeeds (exit code 0):** Parse the presence data. Then still run Step 7 (.gitignore) and Step 8 (.mcp.json setup) to ensure config files exist, then skip to Step 10 for display. No re-check-in needed.
+   - **If request succeeds (exit code 0):** Parse the presence data. Still run Step 7 (start heartbeat), Step 8 (.gitignore), and Step 9 (.mcp.json setup) to ensure heartbeat is running and config files exist, then skip to Step 11 for display. No re-check-in needed.
    - **If request fails:** Delete `.gxv-session` and proceed to Step 3 to re-initialize.
 3. **If `instance_id` does not match (or is missing):** Another console owns this session. Proceed to Step 3 to create a new session for this console. Do NOT delete the existing file yet -- Step 6 will overwrite it.
 
@@ -134,15 +134,44 @@ Use the Write tool to write `.gxv-session` to the current directory as JSON. Thi
 }
 ```
 
-### Step 7: Ensure .gxv-session is gitignored
+### Step 7: Start heartbeat
 
-Read `.gitignore` in the current directory. If `.gxv-session` is not listed, append it:
+The server times out sessions that don't send periodic heartbeats (default: 90 seconds). Start a background heartbeat process to keep the session alive:
+
+```bash
+# Stop any existing heartbeat
+if [ -f ".gxv/heartbeat.pid" ]; then
+  kill $(cat ".gxv/heartbeat.pid") 2>/dev/null || true
+  rm -f ".gxv/heartbeat.pid"
+fi
+
+# Start new heartbeat
+mkdir -p .gxv
+HEARTBEAT_SCRIPT="$HOME/.claude/plugins/gxv-skills/scripts/heartbeat.sh"
+if [ -x "$HEARTBEAT_SCRIPT" ]; then
+  nohup env GXV_API_KEY="$GXV_API_KEY" "$HEARTBEAT_SCRIPT" \
+    "$(pwd)/.gxv-session" 30 \
+    > .gxv/heartbeat.log 2>&1 &
+  echo "heartbeat started (pid=$!, interval=30s)"
+else
+  echo "WARNING: heartbeat.sh not found at $HEARTBEAT_SCRIPT"
+  echo "Sessions will time out without heartbeats."
+  echo "Update gxv-skills: curl -fsSL https://skills.golemxv.com | bash"
+fi
 ```
-# GolemXV session (local, not committed)
+
+**Important:** The heartbeat script reads the session token from `.gxv-session` and sends periodic heartbeats to the server. It automatically stops when the session file is deleted (by `/gxv:done`) or when the session expires server-side.
+
+### Step 8: Ensure session files are gitignored
+
+Read `.gitignore` in the current directory. If `.gxv-session` and `.gxv/` are not already listed, append them:
+```
+# GolemXV session files (local, not committed)
 .gxv-session
+.gxv/
 ```
 
-### Step 8: Set up MCP configuration
+### Step 9: Set up MCP configuration
 
 Determine the MCP server URL. Check for an optional override env var:
 
@@ -179,7 +208,7 @@ For example:
 
 Set `mcp_just_created` flag if the file was created or modified in this step.
 
-### Step 9: Get presence info
+### Step 10: Get presence info
 
 Call presence to get active agents (capture output):
 ```bash
@@ -187,7 +216,7 @@ PRESENCE=$(curl -sf -H "X-API-Key: $GXV_API_KEY" "$GXV_SERVER_URL/_gxv/api/v1/pr
 echo "$PRESENCE" | python3 -c "import sys,json; agents=json.load(sys.stdin)['data']; print(f'active_agents={len(agents)}'); [print(f\"  {a['agent_name']}: {a.get('declared_area','(no scope)')} since {a['started_at']}\") for a in agents]"
 ```
 
-### Step 10: Display connection summary
+### Step 11: Display connection summary
 
 Output this directly as markdown (do NOT use Bash echo -- just output it as your response text):
 
