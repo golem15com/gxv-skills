@@ -51,19 +51,61 @@ STOP here.
 
 ### Step 2: Check for existing session
 
-Read `.gxv-session` in the current directory (NOT parent directories).
+Create the session directory and get this instance's PID:
+```bash
+mkdir -p .gxv && echo "PPID=$PPID"
+```
+
+Check if `.gxv/session-<PPID>.json` exists (this instance's session file) using the Read tool.
 
 **If file exists:**
-1. Parse the JSON to get `session_token`, `project_slug`, and `server_url`.
-2. Verify the session is still active by calling presence via curl (capture output, don't stream):
+1. Parse the JSON to get `session_token`, `project_slug`, `agent_name`, and `server_url`.
+2. Call the presence API (one call):
    ```bash
    PRESENCE=$(curl -sf -H "X-API-Key: $GXV_API_KEY" "$GXV_SERVER_URL/_gxv/api/v1/presence" 2>&1)
-   echo "HTTP status: $?"
+   CURL_EXIT=$?
    ```
-3. **If request succeeds (exit code 0):** Parse the presence data. Then still run Step 7 (.gitignore) and Step 8 (.mcp.json setup) to ensure config files exist, then skip to Step 10 for display. No re-check-in needed.
-4. **If request fails:** Delete `.gxv-session` and proceed to Step 3 to re-initialize.
+3. **If request fails (exit code != 0):** Server unreachable. Delete `.gxv/session-$PPID.json` and proceed to Step 3.
+4. **If request succeeds:** Parse the agent list and check if our `agent_name` appears in the active agents:
+   ```bash
+   echo "$PRESENCE" | python3 -c "
+   import sys, json
+   data = json.load(sys.stdin)['data']
+   names = [a['agent_name'] for a in data]
+   print('active_agents=' + ','.join(names))
+   print('our_agent=AGENT_NAME_HERE')
+   print('found=' + str('AGENT_NAME_HERE' in names))
+   "
+   ```
+   (Replace `AGENT_NAME_HERE` with the actual `agent_name` from the session file.)
+5. **If our agent IS in the active list (`found=True`):** Session is valid. Still run Step 7 (.gitignore) and Step 8 (.mcp.json setup) to ensure config files exist, then skip to Step 10 for display. No re-check-in needed.
+6. **If our agent is NOT in the active list (`found=False`):** Session is stale. Delete `.gxv/session-$PPID.json` and proceed to Step 3.
 
-**If file does not exist:** Proceed to Step 3.
+**If file does not exist:**
+1. Call the presence API once:
+   ```bash
+   PRESENCE=$(curl -sf -H "X-API-Key: $GXV_API_KEY" "$GXV_SERVER_URL/_gxv/api/v1/presence" 2>&1)
+   ```
+2. Clean up stale session files from other instances. List all `.gxv/session-*.json` files, parse each one's `agent_name`, and check against the active presence list:
+   ```bash
+   for f in .gxv/session-*.json; do
+     [ -f "$f" ] || continue
+     AGENT=$(python3 -c "import json; print(json.load(open('$f'))['agent_name'])")
+     ACTIVE=$(echo "$PRESENCE" | python3 -c "
+   import sys, json
+   data = json.load(sys.stdin)['data']
+   names = [a['agent_name'] for a in data]
+   print('yes' if '$AGENT' in names else 'no')
+   ")
+     if [ "$ACTIVE" = "no" ]; then
+       echo "Removing stale session: $f (agent $AGENT no longer active)"
+       rm "$f"
+     else
+       echo "Active session: $f (agent $AGENT)"
+     fi
+   done
+   ```
+3. Proceed to Step 3 (fresh checkin).
 
 ### Step 3: Fetch GOLEM.yaml from server
 
@@ -115,7 +157,7 @@ echo "$CHECKIN" | python3 -c "import sys,json; d=json.load(sys.stdin)['data']; p
 
 ### Step 6: Persist session
 
-Use the Write tool to write `.gxv-session` to the current directory as JSON. This is the canonical session schema -- all other `/gxv:` commands depend on these exact fields:
+Use the Write tool to write `.gxv/session-<PPID>.json` (using the PPID value from Step 2) as JSON. This is the canonical session schema -- all other `/gxv:` commands depend on these exact fields:
 
 ```json
 {
@@ -129,12 +171,17 @@ Use the Write tool to write `.gxv-session` to the current directory as JSON. Thi
 }
 ```
 
-### Step 7: Ensure .gxv-session is gitignored
+### Step 7: Ensure .gxv/ is gitignored and clean up legacy files
 
-Read `.gitignore` in the current directory. If `.gxv-session` is not listed, append it:
+Read `.gitignore` in the current directory. If `.gxv/` is not listed, append it:
 ```
-# GolemXV session (local, not committed)
-.gxv-session
+# GolemXV session directory (local, not committed)
+.gxv/
+```
+
+**Backward compatibility:** If the old `.gxv-session` file exists at the project root, delete it:
+```bash
+[ -f .gxv-session ] && rm .gxv-session && echo "Removed legacy .gxv-session" || true
 ```
 
 ### Step 8: Set up MCP configuration
