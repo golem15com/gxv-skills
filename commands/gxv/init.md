@@ -118,17 +118,17 @@ Use the Write tool to create `.gxv/session-<PPID>.json` (where `<PPID>` is the l
 **Then** start the heartbeat. Replace `<PPID>` with the literal number from Step 1, and `<HEARTBEAT_SCRIPT>` with the `heartbeat_script` path from Step 1:
 
 ```bash
-# Stop any existing heartbeat
-if [ -f ".gxv/heartbeat.pid" ]; then
-  kill $(cat ".gxv/heartbeat.pid") 2>/dev/null || true
-  rm -f ".gxv/heartbeat.pid"
+# Stop any existing heartbeat for THIS session (per-session PID file)
+if [ -f ".gxv/heartbeat-<PPID>.pid" ]; then
+  kill $(cat ".gxv/heartbeat-<PPID>.pid") 2>/dev/null || true
+  rm -f ".gxv/heartbeat-<PPID>.pid"
 fi
 
 # Start new heartbeat
 if [ -x "<HEARTBEAT_SCRIPT>" ]; then
   nohup env GXV_API_KEY="$GXV_API_KEY" "<HEARTBEAT_SCRIPT>" \
     "$(pwd)/.gxv/session-<PPID>.json" 30 \
-    > .gxv/heartbeat.log 2>&1 &
+    > .gxv/heartbeat-<PPID>.log 2>&1 &
   echo "heartbeat_pid=$!"
 else
   echo "WARNING: heartbeat.sh not found at <HEARTBEAT_SCRIPT>"

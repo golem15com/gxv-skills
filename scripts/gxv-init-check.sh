@@ -159,11 +159,20 @@ for session_path in glob.glob(os.path.join(gxv_dir, "session-*.json")):
         other_agent = other_session.get("agent_name", "")
         if other_agent not in active_names:
             os.remove(session_path)
-            # Remove matching inbox file
+            # Remove matching inbox, heartbeat PID, and heartbeat log files
             other_basename = os.path.basename(session_path).replace("session-", "").replace(".json", "")
-            other_inbox = os.path.join(gxv_dir, f"inbox-{other_basename}.json")
-            if os.path.exists(other_inbox):
-                os.remove(other_inbox)
+            for pattern in [f"inbox-{other_basename}.json", f"heartbeat-{other_basename}.pid", f"heartbeat-{other_basename}.log"]:
+                other_file = os.path.join(gxv_dir, pattern)
+                if os.path.exists(other_file):
+                    # Kill heartbeat process if removing its PID file
+                    if pattern.endswith(".pid"):
+                        try:
+                            with open(other_file) as pf:
+                                pid = int(pf.read().strip())
+                            os.kill(pid, 15)  # SIGTERM
+                        except (ValueError, ProcessLookupError, PermissionError, OSError):
+                            pass
+                    os.remove(other_file)
             stale_cleaned += 1
             print(f"Cleaned stale session: {os.path.basename(session_path)} (agent {other_agent})", file=sys.stderr)
     except (json.JSONDecodeError, KeyError, IOError):

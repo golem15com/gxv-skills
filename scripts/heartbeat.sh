@@ -5,7 +5,7 @@
 #
 # Reads session_token, agent_name, project_slug, and server_url from the
 # session JSON file. Requires GXV_API_KEY environment variable.
-# Writes PID to .gxv/heartbeat.pid (alongside session file).
+# Writes PID to .gxv/heartbeat-<SID>.pid (per-session, alongside session file).
 #
 # Each cycle:
 #   1. Sends heartbeat POST to keep session alive
@@ -24,7 +24,7 @@ INTERVAL="${2:-30}"
 # Resolve to absolute path
 SESSION_FILE="$(cd "$(dirname "$SESSION_FILE")" && pwd)/$(basename "$SESSION_FILE")"
 GXV_DIR="$(dirname "$SESSION_FILE")"
-PIDFILE="$GXV_DIR/heartbeat.pid"
+PIDFILE="$GXV_DIR/heartbeat-${SID}.pid"
 
 # Extract session ID from filename (e.g., session-1181675.json → 1181675)
 SESSION_BASENAME="$(basename "$SESSION_FILE" .json)"

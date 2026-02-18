@@ -119,17 +119,18 @@ echo "checkout=$CHECKOUT_CODE"
 
 ### Step 4: Stop heartbeat and delete session + inbox files
 
-Stop the background heartbeat process and clean up session and inbox files. Use the literal PPID from Step 1 (NOT `$PPID`):
+Stop the background heartbeat process and clean up session, inbox, heartbeat PID, and log files. Use the literal PPID from Step 1 (NOT `$PPID`):
 ```bash
-# Stop heartbeat
-if [ -f ".gxv/heartbeat.pid" ]; then
-  kill $(cat ".gxv/heartbeat.pid") 2>/dev/null || true
-  rm -f ".gxv/heartbeat.pid"
+# Stop heartbeat (per-session PID file)
+if [ -f ".gxv/heartbeat-LITERAL_PPID.pid" ]; then
+  kill $(cat ".gxv/heartbeat-LITERAL_PPID.pid") 2>/dev/null || true
+  rm -f ".gxv/heartbeat-LITERAL_PPID.pid"
 fi
 
-# Delete session and inbox files (use literal PPID, e.g. 1234567)
+# Delete session, inbox, and heartbeat log files (use literal PPID, e.g. 1234567)
 rm -f ".gxv/session-LITERAL_PPID.json"
 rm -f ".gxv/inbox-LITERAL_PPID.json"
+rm -f ".gxv/heartbeat-LITERAL_PPID.log"
 echo "cleanup done"
 ```
 (Replace `LITERAL_PPID` with the actual PPID number captured in Step 1.)
