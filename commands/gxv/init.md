@@ -48,6 +48,8 @@ Create the session directory and get this instance's PID:
 mkdir -p .gxv && echo "PPID=$PPID"
 ```
 
+**CRITICAL:** Store the PPID number from the output above. You MUST use this exact number as a literal value in all subsequent steps. Do NOT use `$PPID` as a shell variable in later Bash commands — each Bash tool call spawns a new shell with a different `$PPID`. Instead, substitute the number directly (e.g., `.gxv/session-1147991.json`).
+
 Check if `.gxv/session-<PPID>.json` exists (this instance's session file) using the Read tool.
 
 **If file exists:**
@@ -147,9 +149,11 @@ echo "$CHECKIN" | python3 -c "import sys,json; d=json.load(sys.stdin)['data']; p
 
 **If checkin fails:** Show only the error message, not the full response body. STOP.
 
+**IMPORTANT:** Do NOT combine checkin and session persistence into a single Bash command. The checkin response must be parsed first, then the session file must be written with the Write tool in Step 6. This ensures the correct PPID value (from Step 2) is used in the filename.
+
 ### Step 6: Persist session
 
-Use the Write tool to write `.gxv/session-<PPID>.json` (using the PPID value from Step 2) as JSON. This is the canonical session schema -- all other `/gxv:` commands depend on these exact fields:
+Use the Write tool to write `.gxv/session-<PPID>.json` (using the literal PPID number from Step 2) as JSON. This is the canonical session schema -- all other `/gxv:` commands depend on these exact fields:
 
 ```json
 {
@@ -167,6 +171,8 @@ Use the Write tool to write `.gxv/session-<PPID>.json` (using the PPID value fro
 
 The server times out sessions that don't send periodic heartbeats (default: 90 seconds). Start a background heartbeat process to keep the session alive:
 
+Replace `<PPID>` below with the literal PPID number from Step 2. Do NOT use `$PPID` — it will resolve to a different value in this shell.
+
 ```bash
 # Stop any existing heartbeat
 if [ -f ".gxv/heartbeat.pid" ]; then
@@ -178,7 +184,7 @@ fi
 HEARTBEAT_SCRIPT="$HOME/.claude/plugins/gxv-skills/scripts/heartbeat.sh"
 if [ -x "$HEARTBEAT_SCRIPT" ]; then
   nohup env GXV_API_KEY="$GXV_API_KEY" "$HEARTBEAT_SCRIPT" \
-    "$(pwd)/.gxv/session-$PPID.json" 30 \
+    "$(pwd)/.gxv/session-<PPID>.json" 30 \
     > .gxv/heartbeat.log 2>&1 &
   echo "heartbeat started (pid=$!, interval=30s)"
 else
