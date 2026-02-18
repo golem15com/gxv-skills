@@ -23,11 +23,11 @@ For all Bash commands in this skill:
 
 ### Step 1: Validate environment variables
 
-Check that both required env vars are set without printing their values:
+Check that the API key is set and apply the default server URL if not overridden:
 
 ```bash
 if [ -z "$GXV_API_KEY" ]; then echo "GXV_API_KEY=(unset)"; else echo "GXV_API_KEY=${GXV_API_KEY:0:8}..."; fi && \
-if [ -z "$GXV_SERVER_URL" ]; then echo "GXV_SERVER_URL=(unset)"; else echo "GXV_SERVER_URL=$GXV_SERVER_URL"; fi && \
+if [ -z "$GXV_SERVER_URL" ]; then export GXV_SERVER_URL=https://golemxv.com && echo "GXV_SERVER_URL=$GXV_SERVER_URL (default)"; else echo "GXV_SERVER_URL=$GXV_SERVER_URL (custom)"; fi && \
 echo "GXV_MCP_URL=${GXV_MCP_URL:-(auto: \$GXV_SERVER_URL/mcp)}"
 ```
 
@@ -38,14 +38,6 @@ GXV_API_KEY is not set.
   export GXV_API_KEY=gxv_your_key_here
 
 Get an API key from your GolemXV project settings in the dashboard.
-```
-STOP here.
-
-**If GXV_SERVER_URL is empty or unset:**
-```
-GXV_SERVER_URL is not set.
-
-  export GXV_SERVER_URL=https://your-golemxv-server.com
 ```
 STOP here.
 
@@ -193,7 +185,7 @@ echo "GXV_MCP_URL=${GXV_MCP_URL:-(unset)}"
 ```
 
 - If `GXV_MCP_URL` is set, use that as the MCP URL (for dev setups where MCP runs on a different port)
-- If `GXV_MCP_URL` is not set, use `${GXV_SERVER_URL}/mcp` (production default -- assumes reverse proxy)
+- If `GXV_MCP_URL` is not set, use `${GXV_SERVER_URL}/mcp` (defaults to `https://golemxv.com/mcp` since GXV_SERVER_URL defaults to `https://golemxv.com`)
 
 Check if `.mcp.json` exists in the current directory.
 
@@ -214,7 +206,8 @@ Check if `.mcp.json` exists in the current directory.
 
 For example:
 - If `GXV_MCP_URL=http://localhost:3100/mcp` → use that literally
-- If `GXV_MCP_URL` unset and `GXV_SERVER_URL=https://app.golemxv.com` → use `${GXV_SERVER_URL}/mcp` (with the env var placeholder, so it stays dynamic)
+- If `GXV_MCP_URL` unset and `GXV_SERVER_URL=https://golemxv.com` (default) → use `https://golemxv.com/mcp`
+- If `GXV_MCP_URL` unset and `GXV_SERVER_URL=https://custom.example.com` (custom) → use `https://custom.example.com/mcp`
 
 **If `.mcp.json` exists:** Read it and check if the `golemxv` server entry is present under `mcpServers`. If not, add it (preserve existing entries). If it already exists, leave it unchanged.
 
