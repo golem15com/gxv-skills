@@ -41,33 +41,63 @@ Get an API key from your GolemXV project settings in the dashboard.
 ```
 STOP here.
 
-### Step 2: Generate instance ID and check for existing session
+### Step 2: Check for existing session
 
-First, generate a unique instance ID for this Claude Code session (if not already set). This ID distinguishes concurrent consoles sharing the same working directory:
-
+Create the session directory and get this instance's PID:
 ```bash
-if [ -z "$GXV_INSTANCE_ID" ]; then
-  export GXV_INSTANCE_ID=$(head -c 8 /dev/urandom | xxd -p)
-  echo "GXV_INSTANCE_ID=$GXV_INSTANCE_ID (new)"
-else
-  echo "GXV_INSTANCE_ID=$GXV_INSTANCE_ID (existing)"
-fi
+mkdir -p .gxv && echo "PPID=$PPID"
 ```
 
-Now read `.gxv-session` in the current directory (NOT parent directories).
+Check if `.gxv/session-<PPID>.json` exists (this instance's session file) using the Read tool.
 
 **If file exists:**
-1. Parse the JSON to get `session_token`, `project_slug`, `server_url`, and `instance_id`.
-2. **If `instance_id` in the file matches `$GXV_INSTANCE_ID`:** This is our own session from a previous `/gxv:init` run in the same console. Verify it is still active by calling presence via curl (capture output, don't stream):
+1. Parse the JSON to get `session_token`, `project_slug`, `agent_name`, and `server_url`.
+2. Call the presence API (one call):
    ```bash
    PRESENCE=$(curl -sf -H "X-API-Key: $GXV_API_KEY" "$GXV_SERVER_URL/_gxv/api/v1/presence" 2>&1)
-   echo "HTTP status: $?"
+   CURL_EXIT=$?
    ```
-   - **If request succeeds (exit code 0):** Parse the presence data. Still run Step 7 (start heartbeat), Step 8 (.gitignore), and Step 9 (.mcp.json setup) to ensure heartbeat is running and config files exist, then skip to Step 11 for display. No re-check-in needed.
-   - **If request fails:** Delete `.gxv-session` and proceed to Step 3 to re-initialize.
-3. **If `instance_id` does not match (or is missing):** Another console owns this session. Proceed to Step 3 to create a new session for this console. Do NOT delete the existing file yet -- Step 6 will overwrite it.
+3. **If request fails (exit code != 0):** Server unreachable. Delete `.gxv/session-$PPID.json` and proceed to Step 3.
+4. **If request succeeds:** Parse the agent list and check if our `agent_name` appears in the active agents:
+   ```bash
+   echo "$PRESENCE" | python3 -c "
+   import sys, json
+   data = json.load(sys.stdin)['data']
+   names = [a['agent_name'] for a in data]
+   print('active_agents=' + ','.join(names))
+   print('our_agent=AGENT_NAME_HERE')
+   print('found=' + str('AGENT_NAME_HERE' in names))
+   "
+   ```
+   (Replace `AGENT_NAME_HERE` with the actual `agent_name` from the session file.)
+5. **If our agent IS in the active list (`found=True`):** Session is valid. Still run Step 7 (start heartbeat), Step 8 (.gitignore), and Step 9 (.mcp.json setup) to ensure heartbeat is running and config files exist, then skip to Step 11 for display. No re-check-in needed.
+6. **If our agent is NOT in the active list (`found=False`):** Session is stale. Delete `.gxv/session-$PPID.json` and proceed to Step 3.
 
-**If file does not exist:** Proceed to Step 3.
+**If file does not exist:**
+1. Call the presence API once:
+   ```bash
+   PRESENCE=$(curl -sf -H "X-API-Key: $GXV_API_KEY" "$GXV_SERVER_URL/_gxv/api/v1/presence" 2>&1)
+   ```
+2. Clean up stale session files from other instances. List all `.gxv/session-*.json` files, parse each one's `agent_name`, and check against the active presence list:
+   ```bash
+   for f in .gxv/session-*.json; do
+     [ -f "$f" ] || continue
+     AGENT=$(python3 -c "import json; print(json.load(open('$f'))['agent_name'])")
+     ACTIVE=$(echo "$PRESENCE" | python3 -c "
+   import sys, json
+   data = json.load(sys.stdin)['data']
+   names = [a['agent_name'] for a in data]
+   print('yes' if '$AGENT' in names else 'no')
+   ")
+     if [ "$ACTIVE" = "no" ]; then
+       echo "Removing stale session: $f (agent $AGENT no longer active)"
+       rm "$f"
+     else
+       echo "Active session: $f (agent $AGENT)"
+     fi
+   done
+   ```
+3. Proceed to Step 3 (fresh checkin).
 
 ### Step 3: Fetch GOLEM.yaml from server
 
@@ -119,7 +149,7 @@ echo "$CHECKIN" | python3 -c "import sys,json; d=json.load(sys.stdin)['data']; p
 
 ### Step 6: Persist session
 
-Use the Write tool to write `.gxv-session` to the current directory as JSON. This is the canonical session schema -- all other `/gxv:` commands depend on these exact fields:
+Use the Write tool to write `.gxv/session-<PPID>.json` (using the PPID value from Step 2) as JSON. This is the canonical session schema -- all other `/gxv:` commands depend on these exact fields:
 
 ```json
 {
@@ -129,7 +159,6 @@ Use the Write tool to write `.gxv-session` to the current directory as JSON. Thi
   "project_name": "<from GOLEM.yaml>",
   "agent_name": "<from checkin response>",
   "server_url": "<GXV_SERVER_URL value>",
-  "instance_id": "<GXV_INSTANCE_ID value>",
   "checked_in_at": "<ISO 8601 timestamp>"
 }
 ```
@@ -146,11 +175,10 @@ if [ -f ".gxv/heartbeat.pid" ]; then
 fi
 
 # Start new heartbeat
-mkdir -p .gxv
 HEARTBEAT_SCRIPT="$HOME/.claude/plugins/gxv-skills/scripts/heartbeat.sh"
 if [ -x "$HEARTBEAT_SCRIPT" ]; then
   nohup env GXV_API_KEY="$GXV_API_KEY" "$HEARTBEAT_SCRIPT" \
-    "$(pwd)/.gxv-session" 30 \
+    "$(pwd)/.gxv/session-$PPID.json" 30 \
     > .gxv/heartbeat.log 2>&1 &
   echo "heartbeat started (pid=$!, interval=30s)"
 else
@@ -160,15 +188,19 @@ else
 fi
 ```
 
-**Important:** The heartbeat script reads the session token from `.gxv-session` and sends periodic heartbeats to the server. It automatically stops when the session file is deleted (by `/gxv:done`) or when the session expires server-side.
+**Important:** The heartbeat script reads the session token from the session file and sends periodic heartbeats to the server. It automatically stops when the session file is deleted (by `/gxv:done`) or when the session expires server-side.
 
-### Step 8: Ensure session files are gitignored
+### Step 8: Ensure .gxv/ is gitignored and clean up legacy files
 
-Read `.gitignore` in the current directory. If `.gxv-session` and `.gxv/` are not already listed, append them:
+Read `.gitignore` in the current directory. If `.gxv/` is not listed, append it:
 ```
-# GolemXV session files (local, not committed)
-.gxv-session
+# GolemXV session directory (local, not committed)
 .gxv/
+```
+
+**Backward compatibility:** If the old `.gxv-session` file exists at the project root, delete it:
+```bash
+[ -f .gxv-session ] && rm .gxv-session && echo "Removed legacy .gxv-session" || true
 ```
 
 ### Step 9: Set up MCP configuration

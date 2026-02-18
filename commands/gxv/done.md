@@ -16,7 +16,12 @@ Complete your current work, send a departure broadcast, and check out of GolemXV
 
 ### Step 1: Load session
 
-Read `.gxv-session` in the project root.
+Get this instance's process ID:
+```bash
+echo $PPID
+```
+
+Read `.gxv/session-<PPID>.json` in the current directory (using the PPID value from above).
 
 **If missing:**
 ```
@@ -83,7 +88,7 @@ if [ -f ".gxv/heartbeat.pid" ]; then
 fi
 
 # Delete session
-rm -f .gxv-session
+rm -f ".gxv/session-$PPID.json"
 ```
 
 ### Step 7: Display checkout summary

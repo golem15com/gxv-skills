@@ -5,22 +5,20 @@
 #
 # Reads session_token and server_url from the session JSON file.
 # Requires GXV_API_KEY environment variable.
-# Writes PID to .gxv/heartbeat.pid for management.
+# Writes PID to .gxv/heartbeat.pid (alongside session file).
 #
 # Exits automatically when:
 #   - Session file is deleted (agent checked out)
 #   - Server returns 404/401 (session expired/invalid)
-#   - GXV_API_KEY is missing
 
 set -euo pipefail
 
 SESSION_FILE="${1:?Usage: heartbeat.sh <session-file> [interval-seconds]}"
 INTERVAL="${2:-30}"
 
-# Resolve paths
-PROJECT_DIR="$(cd "$(dirname "$SESSION_FILE")" && pwd)"
-SESSION_FILE="$PROJECT_DIR/$(basename "$SESSION_FILE")"
-PIDFILE="$PROJECT_DIR/.gxv/heartbeat.pid"
+# Resolve to absolute path
+SESSION_FILE="$(cd "$(dirname "$SESSION_FILE")" && pwd)/$(basename "$SESSION_FILE")"
+PIDFILE="$(dirname "$SESSION_FILE")/heartbeat.pid"
 
 # Validate
 if [ ! -f "$SESSION_FILE" ]; then
@@ -35,7 +33,6 @@ TOKEN=$(python3 -c "import json; print(json.load(open('$SESSION_FILE'))['session
 SERVER=$(python3 -c "import json; print(json.load(open('$SESSION_FILE'))['server_url'])")
 
 # Write PID file
-mkdir -p "$(dirname "$PIDFILE")"
 echo $$ > "$PIDFILE"
 trap 'rm -f "$PIDFILE"' EXIT
 
