@@ -24,11 +24,11 @@ INTERVAL="${2:-30}"
 # Resolve to absolute path
 SESSION_FILE="$(cd "$(dirname "$SESSION_FILE")" && pwd)/$(basename "$SESSION_FILE")"
 GXV_DIR="$(dirname "$SESSION_FILE")"
-PIDFILE="$GXV_DIR/heartbeat-${SID}.pid"
 
 # Extract session ID from filename (e.g., session-1181675.json → 1181675)
 SESSION_BASENAME="$(basename "$SESSION_FILE" .json)"
 SID="${SESSION_BASENAME#session-}"
+PIDFILE="$GXV_DIR/heartbeat-${SID}.pid"
 INBOX_FILE="$GXV_DIR/inbox-${SID}.json"
 
 # Validate
