@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "golemxv": {
+      "type": "http",
+      "url": "http://localhost:3100/mcp",
+      "headers": {
+        "X-API-Key": "${GXV_API_KEY}"
+      }
+    }
+  }
+}

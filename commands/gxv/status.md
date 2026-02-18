@@ -1,11 +1,15 @@
 ---
 description: Show GolemXV coordination status
-allowed-tools: Read, Bash, mcp__golemxv__*
+allowed-tools: Read, Bash
 ---
 
 # /gxv:status
 
 Show the current coordination status for this project.
+
+## Token Safety
+
+**NEVER display raw session tokens or full curl responses.** Capture output into variables and parse. Show only the first 8 characters of tokens followed by `...`.
 
 ## Process
 
@@ -26,29 +30,46 @@ Not connected. Run `/gxv:init` to connect to GolemXV.
 ```
 STOP here.
 
-**If found:** Parse JSON and extract `session_token`, `project_slug`, `project_name`, `agent_name`, `checked_in_at`.
+**If found:** Parse JSON and extract `session_token`, `project_slug`, `project_name`, `agent_name`, `server_url`, `checked_in_at`.
 
-**After parsing**, send a heartbeat to keep the session alive. Call `mcp__golemxv__heartbeat` with the `session_token`. If heartbeat fails (session expired), tell the user to run `/gxv:init` to reconnect and STOP.
+**After parsing**, send a heartbeat to keep the session alive:
+```bash
+HTTP_CODE=$(curl -sf -o /dev/null -w "%{http_code}" \
+  -H "X-API-Key: $GXV_API_KEY" \
+  -H "Content-Type: application/json" \
+  -X POST "SERVER_URL/_gxv/api/v1/heartbeat" \
+  -d '{"session_token":"SESSION_TOKEN"}' 2>/dev/null)
+echo "heartbeat_status=$HTTP_CODE"
+```
+(Replace `SERVER_URL` and `SESSION_TOKEN` with literal values from the session file.)
 
-### Step 2: Get presence
+If heartbeat returns 404 or 401: session expired, tell user to run `/gxv:init` to reconnect and STOP.
 
-Call `mcp__golemxv__presence` with the `project_slug`.
+### Step 2: Fetch all status data
 
-This returns a list of active agents with their scopes and check-in times.
+Fetch presence, messages, and tasks in a single Bash invocation:
+```bash
+PRESENCE=$(curl -sf -H "X-API-Key: $GXV_API_KEY" \
+  "SERVER_URL/_gxv/api/v1/presence" 2>/dev/null)
+MESSAGES=$(curl -sf -H "X-API-Key: $GXV_API_KEY" \
+  "SERVER_URL/_gxv/api/v1/messages?limit=5" 2>/dev/null)
+TASKS=$(curl -sf -H "X-API-Key: $GXV_API_KEY" \
+  "SERVER_URL/_gxv/api/v1/tasks" 2>/dev/null)
 
-**If session is expired or invalid:** Tell the user their session has expired and to run `/gxv:init` again.
+echo "===PRESENCE==="
+echo "$PRESENCE"
+echo "===MESSAGES==="
+echo "$MESSAGES"
+echo "===TASKS==="
+echo "$TASKS"
+```
+(Replace `SERVER_URL` with the literal value from the session file.)
 
-### Step 3: Get recent messages
+**If any request fails:** Tell the user their session may have expired and to run `/gxv:init` again.
 
-Call `mcp__golemxv__get_messages` with the `project_slug` and `limit=5` for recent messages.
+### Step 3: Display dashboard
 
-### Step 4: Get tasks
-
-Call `mcp__golemxv__list_tasks` with the `project_slug` to get pending and assigned tasks.
-
-### Step 5: Display dashboard
-
-Format the output as:
+Parse the JSON responses and format the output as:
 
 ```
 ## GolemXV Status: [project_name]
@@ -56,7 +77,7 @@ Format the output as:
 ### Connection
 - **Status:** Connected
 - **Agent:** [agent_name]
-- **Session:** [abbreviated session_token]...
+- **Session:** [first 8 chars of session_token]...
 - **Checked in:** [relative time, e.g., "2 hours ago"]
 
 ### Active Agents ([count])
@@ -80,3 +101,5 @@ Format the output as:
 ```
 
 If any section has no data, show "None" instead of an empty list.
+
+Extract your own scope (declared_area, declared_files) from the presence data by finding the entry where agent_name matches your agent name from the session file.

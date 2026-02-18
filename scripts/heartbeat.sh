@@ -108,6 +108,13 @@ except (json.JSONDecodeError, KeyError):
 # Filter out own messages
 new_msgs = [m for m in new_msgs if m.get('sender', '') != agent_name]
 
+# Filter out DMs between other agents — keep only broadcasts and DMs to this agent
+new_msgs = [m for m in new_msgs
+    if m.get('recipient', 'broadcast') == 'broadcast'
+    or m.get('recipient_type', '') == 'broadcast'
+    or m.get('recipient', '') == agent_name
+    or m.get('recipient_name', '') == agent_name]
+
 # Load existing inbox
 existing = {'last_polled_at': '', 'last_seen_at': '', 'agent_name': agent_name, 'messages': []}
 if os.path.exists(inbox_file):

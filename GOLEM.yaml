@@ -1,0 +1,9 @@
+project:
+  name: GXV
+  slug: gxv
+  description: GXV
+coordination:
+  conflict_mode: warn
+  heartbeat_interval_seconds: 30
+  heartbeat_ttl_seconds: 90
+work_areas: {  }

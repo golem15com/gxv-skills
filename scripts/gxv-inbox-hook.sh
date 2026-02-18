@@ -37,6 +37,7 @@ if not inbox_files:
     sys.exit(0)
 
 unread = []
+agent_name = ''
 
 for inbox_file in inbox_files:
     try:
@@ -45,8 +46,23 @@ for inbox_file in inbox_files:
     except (json.JSONDecodeError, IOError):
         continue
 
+    # Extract agent_name from inbox data (set by heartbeat)
+    file_agent = data.get('agent_name', '')
+    if file_agent and not agent_name:
+        agent_name = file_agent
+
     last_seen = data.get('last_seen_at', '')
     messages = data.get('messages', [])
+
+    # Defense-in-depth: filter out DMs between other agents
+    # (heartbeat should already exclude these, but handle old inbox files)
+    if agent_name:
+        messages = [m for m in messages
+            if m.get('recipient', 'broadcast') == 'broadcast'
+            or m.get('recipient_type', '') == 'broadcast'
+            or m.get('recipient', '') == agent_name
+            or m.get('recipient_name', '') == agent_name
+            or m.get('sender', '') == agent_name]
 
     file_unread = []
     for msg in messages:
@@ -89,11 +105,15 @@ for msg in unread:
     recipient = msg.get('recipient', 'broadcast')
     content = msg.get('content', '')
 
-    if recipient == 'broadcast':
+    if recipient == 'broadcast' or not recipient:
         print(f'  [{time_str}] {sender} (broadcast): {content}')
+    elif agent_name and (recipient == agent_name or msg.get('recipient_name', '') == agent_name):
+        # DM addressed to this agent — highlight with -> YOU
+        print(f'  [{time_str}] {sender} -> YOU: {content}')
     else:
+        # DM from this agent to someone else, or unknown recipient
         print(f'  [{time_str}] {sender} -> {recipient}: {content}')
 
 print()
-print('Reply: /gxv:msg \"your reply\"')
+print('Reply: /gxv:msg \"your reply\" | DM: /gxv:msg --to agent-name \"message\"')
 " 2>/dev/null || true
