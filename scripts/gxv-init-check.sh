@@ -22,6 +22,23 @@ SERVER_URL="${SERVER_URL%/}"
 # $PPID is the parent of this script process = the Bash tool process = Claude Code process.
 STABLE_PPID="$PPID"
 
+# ── 1b. Early exit for spawned containers ──────────────────────────────
+# Spawned agents already have a session managed by the spawner process.
+# Running init would create a duplicate phantom session via checkin.
+if [ -n "${GXV_SESSION_TOKEN:-}" ]; then
+  TOKEN_PREFIX="${GXV_SESSION_TOKEN:0:8}"
+  jq -n \
+    --arg tp "$TOKEN_PREFIX" \
+    --arg slug "${GXV_PROJECT_SLUG:-}" \
+    '{
+      status: "spawned",
+      message: "Session managed by spawner — no checkin needed",
+      token_prefix: $tp,
+      project_slug: (if $slug == "" then null else $slug end)
+    }'
+  exit 0
+fi
+
 # ── 2. Validate GXV_API_KEY ──────────────────────────────────────────
 if [ -z "${GXV_API_KEY:-}" ]; then
   jq -n '{"status": "error", "error": "GXV_API_KEY not set"}'

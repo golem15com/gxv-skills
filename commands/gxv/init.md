@@ -32,6 +32,16 @@ echo "$RESULT"
 
 Parse the JSON output. Handle these cases:
 
+**If `status` is `"spawned"`:**
+This agent's session is managed by the spawner process. Display:
+```
+Already connected via spawner session (token: [token_prefix]...).
+No checkin needed — the spawner manages this agent's session and heartbeat.
+```
+If `project_slug` is non-null, also show: `**Project:** [project_slug]`
+
+STOP here. Do not proceed to any further steps.
+
 **If `status` is `"error"` with `error` = `"GXV_API_KEY not set"`:**
 ```
 GXV_API_KEY is not set.
