@@ -40,11 +40,11 @@ fi
 
 API_KEY="${GXV_API_KEY:?GXV_API_KEY environment variable is required}"
 
-# Parse session fields
-TOKEN=$(python3 -c "import json; print(json.load(open('$SESSION_FILE'))['session_token'])")
-SERVER=$(python3 -c "import json; print(json.load(open('$SESSION_FILE'))['server_url'])")
-AGENT_NAME=$(python3 -c "import json; print(json.load(open('$SESSION_FILE'))['agent_name'])")
-PROJECT_SLUG=$(python3 -c "import json; print(json.load(open('$SESSION_FILE'))['project_slug'])")
+# Parse session fields using jq
+TOKEN=$(jq -r '.session_token' "$SESSION_FILE")
+SERVER=$(jq -r '.server_url' "$SESSION_FILE")
+AGENT_NAME=$(jq -r '.agent_name' "$SESSION_FILE")
+PROJECT_SLUG=$(jq -r '.project_slug' "$SESSION_FILE")
 
 # Write PID file
 echo $$ > "$PIDFILE"
@@ -53,13 +53,7 @@ trap 'rm -f "$PIDFILE"' EXIT
 # Initialize last_polled_at from existing inbox file, or empty
 LAST_POLLED=""
 if [ -f "$INBOX_FILE" ]; then
-  LAST_POLLED=$(python3 -c "
-import json, sys
-try:
-    data = json.load(open('$INBOX_FILE'))
-    print(data.get('last_polled_at', ''))
-except: pass
-" 2>/dev/null) || true
+  LAST_POLLED=$(jq -r '.last_polled_at // ""' "$INBOX_FILE" 2>/dev/null) || true
 fi
 
 # Heartbeat + message poll loop
@@ -69,6 +63,7 @@ while true; do
 
   # --- 1. Send heartbeat ---
   HTTP_CODE=$(curl -sf -o /dev/null -w "%{http_code}" \
+    --max-time 10 --connect-timeout 5 \
     -H "X-API-Key: $API_KEY" \
     -H "Content-Type: application/json" \
     -X POST "$SERVER/_gxv/api/v1/heartbeat" \
@@ -86,107 +81,76 @@ while true; do
   fi
 
   MSG_RESPONSE=$(curl -sf \
+    --max-time 10 --connect-timeout 5 \
     -H "X-API-Key: $API_KEY" \
     "$MESSAGES_URL" 2>/dev/null) || true
 
   if [ -n "$MSG_RESPONSE" ]; then
-    # Update inbox file atomically via python (pipe response via stdin to avoid quoting issues)
     POLL_TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-    echo "$MSG_RESPONSE" | python3 -c "
-import json, sys, os
 
-response = sys.stdin.read()
-poll_ts = sys.argv[1]
-agent_name = sys.argv[2]
-inbox_file = sys.argv[3]
-tmp_file = inbox_file + '.tmp'
+    # Update inbox file atomically via jq
+    EXISTING='{}'
+    if [ -f "$INBOX_FILE" ]; then
+      EXISTING=$(cat "$INBOX_FILE" 2>/dev/null) || EXISTING='{}'
+    fi
 
-try:
-    new_msgs = json.loads(response).get('data', [])
-except (json.JSONDecodeError, KeyError):
-    sys.exit(0)
+    echo "$MSG_RESPONSE" | jq --arg poll_ts "$POLL_TS" \
+      --arg agent_name "$AGENT_NAME" \
+      --argjson existing "$EXISTING" '
+      # Extract new messages from response
+      (.data // []) as $new_msgs |
 
-# Filter out own messages
-new_msgs = [m for m in new_msgs if m.get('sender', '') != agent_name]
+      # Filter out own messages and DMs between other agents
+      [$new_msgs[] | select(
+        .sender != $agent_name and (
+          (.recipient // "broadcast") == "broadcast" or
+          (.recipient_type // "") == "broadcast" or
+          (.recipient // "") == $agent_name or
+          (.recipient_name // "") == $agent_name
+        )
+      )] as $filtered |
 
-# Filter out DMs between other agents — keep only broadcasts and DMs to this agent
-new_msgs = [m for m in new_msgs
-    if m.get('recipient', 'broadcast') == 'broadcast'
-    or m.get('recipient_type', '') == 'broadcast'
-    or m.get('recipient', '') == agent_name
-    or m.get('recipient_name', '') == agent_name]
+      # Merge with existing messages, deduplicate by id
+      ($existing.messages // []) as $old_msgs |
+      ([$old_msgs[].id // empty] | map(tostring) | unique) as $existing_ids |
+      [$old_msgs[], ($filtered[] | select((.id | tostring) as $id | ($existing_ids | index($id)) == null))] |
+      sort_by(.created_at // "") |
+      .[-50:] |
 
-# Load existing inbox
-existing = {'last_polled_at': '', 'last_seen_at': '', 'agent_name': agent_name, 'messages': []}
-if os.path.exists(inbox_file):
-    try:
-        with open(inbox_file) as f:
-            existing = json.load(f)
-    except: pass
-
-# Merge: add new messages, deduplicate by id
-existing_ids = {m.get('id') for m in existing.get('messages', [])}
-for m in new_msgs:
-    if m.get('id') not in existing_ids:
-        existing['messages'].append(m)
-        existing_ids.add(m.get('id'))
-
-# Cap at 50 messages (keep newest)
-existing['messages'] = sorted(existing['messages'], key=lambda m: m.get('created_at', ''))[-50:]
-
-existing['last_polled_at'] = poll_ts
-existing['agent_name'] = agent_name
-
-# Atomic write
-with open(tmp_file, 'w') as f:
-    json.dump(existing, f, indent=2)
-os.replace(tmp_file, inbox_file)
-" "$POLL_TS" "$AGENT_NAME" "$INBOX_FILE" 2>/dev/null || true
+      # Build final inbox object
+      {
+        last_polled_at: $poll_ts,
+        last_seen_at: ($existing.last_seen_at // ""),
+        agent_name: $agent_name,
+        messages: .
+      }
+    ' > "${INBOX_FILE}.tmp" 2>/dev/null && mv "${INBOX_FILE}.tmp" "$INBOX_FILE" || true
 
     LAST_POLLED="$POLL_TS"
   fi
 
   # --- 3. Poll presence and cache locally ---
   PRESENCE_RESPONSE=$(curl -sf \
+    --max-time 10 --connect-timeout 5 \
     -H "X-API-Key: $API_KEY" \
     "$SERVER/_gxv/api/v1/presence?project_slug=$PROJECT_SLUG" 2>/dev/null) || true
 
   if [ -n "$PRESENCE_RESPONSE" ]; then
     PRESENCE_TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-    echo "$PRESENCE_RESPONSE" | python3 -c "
-import json, sys, os
 
-response = sys.stdin.read()
-poll_ts = sys.argv[1]
-agent_name = sys.argv[2]
-presence_file = sys.argv[3]
-tmp_file = presence_file + '.tmp'
-
-try:
-    agents = json.loads(response).get('data', [])
-except (json.JSONDecodeError, KeyError):
-    sys.exit(0)
-
-# Build compact presence cache
-cache = {
-    'last_polled_at': poll_ts,
-    'self': agent_name,
-    'agents': []
-}
-
-for a in agents:
-    cache['agents'].append({
-        'agent_name': a.get('agent_name', ''),
-        'declared_area': a.get('declared_area', ''),
-        'declared_files': a.get('declared_files') or [],
-        'started_at': a.get('started_at', ''),
-    })
-
-# Atomic write
-with open(tmp_file, 'w') as f:
-    json.dump(cache, f, indent=2)
-os.replace(tmp_file, presence_file)
-" "$PRESENCE_TS" "$AGENT_NAME" "$PRESENCE_FILE" 2>/dev/null || true
+    echo "$PRESENCE_RESPONSE" | jq --arg poll_ts "$PRESENCE_TS" \
+      --arg agent_name "$AGENT_NAME" '
+      {
+        last_polled_at: $poll_ts,
+        self: $agent_name,
+        agents: [(.data // [])[] | {
+          agent_name: (.agent_name // ""),
+          declared_area: (.declared_area // ""),
+          declared_files: (.declared_files // []),
+          started_at: (.started_at // "")
+        }]
+      }
+    ' > "${PRESENCE_FILE}.tmp" 2>/dev/null && mv "${PRESENCE_FILE}.tmp" "$PRESENCE_FILE" || true
   fi
 
   sleep "$INTERVAL"

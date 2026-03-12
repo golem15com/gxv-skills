@@ -20,301 +20,312 @@ SERVER_URL="${SERVER_URL%/}"
 
 # ── 1. Capture PPID ──────────────────────────────────────────────────
 # $PPID is the parent of this script process = the Bash tool process = Claude Code process.
-# This value is stable within a single Bash tool invocation.
-export STABLE_PPID="$PPID"
+STABLE_PPID="$PPID"
 
 # ── 2. Validate GXV_API_KEY ──────────────────────────────────────────
 if [ -z "${GXV_API_KEY:-}" ]; then
-  python3 -c "
-import json, sys
-json.dump({'status': 'error', 'error': 'GXV_API_KEY not set'}, sys.stdout, indent=2)
-print()
-"
+  jq -n '{"status": "error", "error": "GXV_API_KEY not set"}'
   exit 1
 fi
 
-export API_KEY_PREFIX="${GXV_API_KEY:0:8}"
+API_KEY_PREFIX="${GXV_API_KEY:0:8}"
 
 # ── 3. Create .gxv/ directory ─────────────────────────────────────────
 mkdir -p "$PROJECT_DIR/.gxv"
 
-# ── 4-7. Run all remaining checks via python3 ────────────────────────
-# Using python3 for ALL JSON parsing, session validation, file manipulation.
-# This avoids grep/sed hacks and handles edge cases properly.
+MCP_URL="${GXV_MCP_URL:-${SERVER_URL}/mcp}"
+GXV_DIR="$PROJECT_DIR/.gxv"
+SESSION_FILE="$GXV_DIR/session-${STABLE_PPID}.json"
 
-export MCP_URL="${GXV_MCP_URL:-${SERVER_URL}/mcp}"
+# ── Initialize result JSON ────────────────────────────────────────────
+# We'll build the result incrementally using a temp file
+RESULT_FILE=$(mktemp)
+trap 'rm -f "$RESULT_FILE"' EXIT
 
-python3 << 'PYEOF'
-import json, os, sys, subprocess, glob, time
-
-project_dir = os.environ["PROJECT_DIR"]
-server_url = os.environ["SERVER_URL"]
-api_key = os.environ["GXV_API_KEY"]
-api_key_prefix = os.environ["API_KEY_PREFIX"]
-mcp_url = os.environ["MCP_URL"]
-stable_ppid = os.environ["STABLE_PPID"]
-gxv_mcp_url_set = "GXV_MCP_URL" in os.environ and os.environ.get("GXV_MCP_URL", "") != ""
-
-result = {
-    "status": "ok",
-    "ppid": int(stable_ppid),
-    "env": {
-        "api_key_set": True,
-        "api_key_prefix": api_key_prefix,
-        "server_url": server_url,
-        "mcp_url": mcp_url,
-    },
-    "session": {
-        "exists": False,
-        "valid": False,
-        "file": f".gxv/session-{stable_ppid}.json",
-        "agent_name": None,
-        "stale_cleaned": 0,
-    },
-    "project": {
-        "slug": None,
-        "name": None,
-        "needs_fetch": False,
-    },
-    "gitignore": {
-        "updated": False,
-    },
-    "mcp_json": {
-        "existed": False,
-        "has_golemxv": False,
-        "created": False,
-        "updated": False,
-    },
-    "heartbeat_script": None,
-    "presence": {
-        "active_agents": [],
-    },
-}
+jq -n \
+  --arg ppid "$STABLE_PPID" \
+  --arg api_prefix "$API_KEY_PREFIX" \
+  --arg server_url "$SERVER_URL" \
+  --arg mcp_url "$MCP_URL" \
+  --arg session_file ".gxv/session-${STABLE_PPID}.json" \
+'{
+  status: "ok",
+  ppid: ($ppid | tonumber),
+  env: {
+    api_key_set: true,
+    api_key_prefix: $api_prefix,
+    server_url: $server_url,
+    mcp_url: $mcp_url
+  },
+  session: {
+    exists: false,
+    valid: false,
+    file: $session_file,
+    agent_name: null,
+    stale_cleaned: 0
+  },
+  project: {
+    slug: null,
+    name: null,
+    needs_fetch: false
+  },
+  gitignore: {
+    updated: false
+  },
+  mcp_json: {
+    existed: false,
+    has_golemxv: false,
+    created: false,
+    updated: false
+  },
+  heartbeat_script: null,
+  presence: {
+    active_agents: []
+  }
+}' > "$RESULT_FILE"
 
 # ── 4. Check for existing session file ───────────────────────────────
-session_file = os.path.join(project_dir, ".gxv", f"session-{stable_ppid}.json")
-session_data = None
+SESSION_DATA=""
+SESSION_AGENT=""
 
-if os.path.exists(session_file):
-    try:
-        with open(session_file) as f:
-            session_data = json.load(f)
-        result["session"]["exists"] = True
-        result["session"]["agent_name"] = session_data.get("agent_name")
-    except (json.JSONDecodeError, KeyError, IOError) as e:
-        print(f"Warning: Could not parse session file: {e}", file=sys.stderr)
-        # Remove corrupt session file
-        os.remove(session_file)
-        session_data = None
+if [ -f "$SESSION_FILE" ]; then
+  SESSION_DATA=$(cat "$SESSION_FILE" 2>/dev/null) || true
+  if [ -n "$SESSION_DATA" ] && echo "$SESSION_DATA" | jq empty 2>/dev/null; then
+    SESSION_AGENT=$(echo "$SESSION_DATA" | jq -r '.agent_name // ""')
+    jq '.session.exists = true | .session.agent_name = "'"$SESSION_AGENT"'"' "$RESULT_FILE" > "${RESULT_FILE}.tmp" \
+      && mv "${RESULT_FILE}.tmp" "$RESULT_FILE"
+  else
+    # Corrupt session file — remove it
+    echo "Warning: Could not parse session file" >&2
+    rm -f "$SESSION_FILE"
+    SESSION_DATA=""
+  fi
+fi
 
 # ── 5. Call presence API ──────────────────────────────────────────────
-active_agents = []
-try:
-    proc = subprocess.run(
-        ["curl", "-sf", "-H", f"X-API-Key: {api_key}",
-         f"{server_url}/_gxv/api/v1/presence"],
-        capture_output=True, text=True, timeout=10
-    )
-    if proc.returncode == 0 and proc.stdout.strip():
-        presence_data = json.loads(proc.stdout)
-        active_agents = presence_data.get("data", [])
-except (subprocess.TimeoutExpired, json.JSONDecodeError, Exception) as e:
-    print(f"Warning: Presence API call failed: {e}", file=sys.stderr)
+PRESENCE_RESPONSE=$(curl -sf -H "X-API-Key: ${GXV_API_KEY}" \
+  --max-time 10 --connect-timeout 5 \
+  "${SERVER_URL}/_gxv/api/v1/presence" 2>/dev/null) || true
 
-result["presence"]["active_agents"] = active_agents
-active_names = {a.get("agent_name") for a in active_agents}
+ACTIVE_AGENTS='[]'
+ACTIVE_NAMES=""
+if [ -n "$PRESENCE_RESPONSE" ] && echo "$PRESENCE_RESPONSE" | jq empty 2>/dev/null; then
+  ACTIVE_AGENTS=$(echo "$PRESENCE_RESPONSE" | jq '.data // []')
+  ACTIVE_NAMES=$(echo "$ACTIVE_AGENTS" | jq -r '.[].agent_name // empty' | sort -u)
+  jq --argjson agents "$ACTIVE_AGENTS" '.presence.active_agents = $agents' "$RESULT_FILE" > "${RESULT_FILE}.tmp" \
+    && mv "${RESULT_FILE}.tmp" "$RESULT_FILE"
+fi
 
 # ── 6. Validate existing session ─────────────────────────────────────
-if session_data and result["session"]["exists"]:
-    agent_name = session_data.get("agent_name", "")
-    if agent_name in active_names:
-        result["session"]["valid"] = True
-        result["session"]["token_prefix"] = session_data.get("session_token", "")[:8]
-        result["session"]["session_id"] = session_data.get("session_id")
-    else:
-        # Session is stale -- agent not in active list
-        result["session"]["valid"] = False
-        # Delete the stale session file
-        try:
-            os.remove(session_file)
-            # Also remove matching inbox and presence files
-            for suffix in [f"inbox-{stable_ppid}.json", f"presence-{stable_ppid}.json"]:
-                stale_file = os.path.join(project_dir, ".gxv", suffix)
-                if os.path.exists(stale_file):
-                    os.remove(stale_file)
-        except OSError:
-            pass
-        result["session"]["exists"] = False
-        session_data = None
+if [ -n "$SESSION_DATA" ] && [ -n "$SESSION_AGENT" ]; then
+  # Check if our agent name is in the active list
+  if echo "$ACTIVE_NAMES" | grep -qxF "$SESSION_AGENT" 2>/dev/null; then
+    TOKEN_PREFIX=$(echo "$SESSION_DATA" | jq -r '.session_token // "" | .[0:8]')
+    SESSION_ID=$(echo "$SESSION_DATA" | jq -r '.session_id // null')
+    jq --arg tp "$TOKEN_PREFIX" --arg sid "$SESSION_ID" \
+      '.session.valid = true | .session.token_prefix = $tp | .session.session_id = ($sid | if . == "null" then null else . end)' \
+      "$RESULT_FILE" > "${RESULT_FILE}.tmp" \
+      && mv "${RESULT_FILE}.tmp" "$RESULT_FILE"
+  else
+    # Session is stale — agent not in active list
+    jq '.session.valid = false | .session.exists = false' "$RESULT_FILE" > "${RESULT_FILE}.tmp" \
+      && mv "${RESULT_FILE}.tmp" "$RESULT_FILE"
+    rm -f "$SESSION_FILE"
+    rm -f "$GXV_DIR/inbox-${STABLE_PPID}.json"
+    rm -f "$GXV_DIR/presence-${STABLE_PPID}.json"
+    SESSION_DATA=""
+    SESSION_AGENT=""
+  fi
+fi
 
 # ── 7. Clean stale sessions ──────────────────────────────────────────
-stale_cleaned = 0
-gxv_dir = os.path.join(project_dir, ".gxv")
-for session_path in glob.glob(os.path.join(gxv_dir, "session-*.json")):
-    # Skip our own session (already handled above)
-    if session_path == session_file:
-        continue
-    try:
-        with open(session_path) as f:
-            other_session = json.load(f)
-        other_agent = other_session.get("agent_name", "")
-        if other_agent not in active_names:
-            os.remove(session_path)
-            # Remove matching inbox, heartbeat PID, and heartbeat log files
-            other_basename = os.path.basename(session_path).replace("session-", "").replace(".json", "")
-            for pattern in [f"inbox-{other_basename}.json", f"presence-{other_basename}.json", f"heartbeat-{other_basename}.pid", f"heartbeat-{other_basename}.log"]:
-                other_file = os.path.join(gxv_dir, pattern)
-                if os.path.exists(other_file):
-                    # Kill heartbeat process if removing its PID file
-                    if pattern.endswith(".pid"):
-                        try:
-                            with open(other_file) as pf:
-                                pid = int(pf.read().strip())
-                            os.kill(pid, 15)  # SIGTERM
-                        except (ValueError, ProcessLookupError, PermissionError, OSError):
-                            pass
-                    os.remove(other_file)
-            stale_cleaned += 1
-            print(f"Cleaned stale session: {os.path.basename(session_path)} (agent {other_agent})", file=sys.stderr)
-    except (json.JSONDecodeError, KeyError, IOError):
-        # Corrupt file -- remove it
-        try:
-            os.remove(session_path)
-            stale_cleaned += 1
-        except OSError:
-            pass
+STALE_CLEANED=0
+for OTHER_SESSION in "$GXV_DIR"/session-*.json; do
+  [ -f "$OTHER_SESSION" ] || continue
+  # Skip our own session
+  [ "$OTHER_SESSION" = "$SESSION_FILE" ] && continue
 
-result["session"]["stale_cleaned"] = stale_cleaned
+  OTHER_AGENT=$(jq -r '.agent_name // ""' "$OTHER_SESSION" 2>/dev/null) || true
+  if [ -z "$OTHER_AGENT" ] || ! echo "$ACTIVE_NAMES" | grep -qxF "$OTHER_AGENT" 2>/dev/null; then
+    rm -f "$OTHER_SESSION"
+
+    # Extract the SID from filename
+    OTHER_BASENAME="$(basename "$OTHER_SESSION" .json)"
+    OTHER_SID="${OTHER_BASENAME#session-}"
+
+    # Kill heartbeat process if PID file exists
+    HPID_FILE="$GXV_DIR/heartbeat-${OTHER_SID}.pid"
+    if [ -f "$HPID_FILE" ]; then
+      HPID=$(cat "$HPID_FILE" 2>/dev/null) || true
+      if [ -n "$HPID" ]; then
+        kill "$HPID" 2>/dev/null || true
+      fi
+      rm -f "$HPID_FILE"
+    fi
+
+    # Remove associated files
+    rm -f "$GXV_DIR/inbox-${OTHER_SID}.json"
+    rm -f "$GXV_DIR/presence-${OTHER_SID}.json"
+    rm -f "$GXV_DIR/heartbeat-${OTHER_SID}.log"
+
+    STALE_CLEANED=$((STALE_CLEANED + 1))
+    echo "Cleaned stale session: $(basename "$OTHER_SESSION") (agent ${OTHER_AGENT})" >&2
+  fi
+done
+
+if [ "$STALE_CLEANED" -gt 0 ]; then
+  jq --argjson count "$STALE_CLEANED" '.session.stale_cleaned = $count' "$RESULT_FILE" > "${RESULT_FILE}.tmp" \
+    && mv "${RESULT_FILE}.tmp" "$RESULT_FILE"
+fi
 
 # ── 8. Check GOLEM.yaml ──────────────────────────────────────────────
-golem_yaml_path = os.path.join(project_dir, "GOLEM.yaml")
-if os.path.exists(golem_yaml_path):
-    try:
-        # Parse YAML manually (simple key: value format, no external deps)
-        with open(golem_yaml_path) as f:
-            content = f.read()
-        # Extract project.slug and project.name using simple parsing
-        slug = None
-        name = None
-        in_project = False
-        for line in content.splitlines():
-            stripped = line.strip()
-            if stripped.startswith("project:"):
-                in_project = True
-                continue
-            if in_project and not line.startswith(" ") and not line.startswith("\t") and stripped:
-                in_project = False
-            if in_project:
-                if stripped.startswith("slug:"):
-                    slug = stripped.split(":", 1)[1].strip().strip("'\"")
-                elif stripped.startswith("name:"):
-                    name = stripped.split(":", 1)[1].strip().strip("'\"")
-        result["project"]["slug"] = slug
-        result["project"]["name"] = name or slug
-        result["project"]["needs_fetch"] = False
-    except Exception as e:
-        print(f"Warning: Could not parse GOLEM.yaml: {e}", file=sys.stderr)
-        result["project"]["needs_fetch"] = True
-else:
-    result["project"]["needs_fetch"] = True
+GOLEM_YAML="$PROJECT_DIR/GOLEM.yaml"
+if [ -f "$GOLEM_YAML" ]; then
+  # Simple YAML parsing for project.slug and project.name
+  PROJ_SLUG=""
+  PROJ_NAME=""
+  IN_PROJECT=false
+  while IFS= read -r line; do
+    stripped="${line#"${line%%[![:space:]]*}"}"
+    if [[ "$stripped" = project:* ]]; then
+      IN_PROJECT=true
+      continue
+    fi
+    if $IN_PROJECT && [[ "$line" != " "* ]] && [[ "$line" != "	"* ]] && [ -n "$stripped" ]; then
+      IN_PROJECT=false
+    fi
+    if $IN_PROJECT; then
+      if [[ "$stripped" = slug:* ]]; then
+        PROJ_SLUG="${stripped#slug:}"
+        PROJ_SLUG="${PROJ_SLUG#"${PROJ_SLUG%%[![:space:]]*}"}"
+        PROJ_SLUG="${PROJ_SLUG%"${PROJ_SLUG##*[![:space:]]}"}"
+        PROJ_SLUG="${PROJ_SLUG//\'/}"
+        PROJ_SLUG="${PROJ_SLUG//\"/}"
+      elif [[ "$stripped" = name:* ]]; then
+        PROJ_NAME="${stripped#name:}"
+        PROJ_NAME="${PROJ_NAME#"${PROJ_NAME%%[![:space:]]*}"}"
+        PROJ_NAME="${PROJ_NAME%"${PROJ_NAME##*[![:space:]]}"}"
+        PROJ_NAME="${PROJ_NAME//\'/}"
+        PROJ_NAME="${PROJ_NAME//\"/}"
+      fi
+    fi
+  done < "$GOLEM_YAML"
+
+  if [ -n "$PROJ_SLUG" ]; then
+    DISPLAY_NAME="${PROJ_NAME:-$PROJ_SLUG}"
+    jq --arg slug "$PROJ_SLUG" --arg name "$DISPLAY_NAME" \
+      '.project.slug = $slug | .project.name = $name | .project.needs_fetch = false' \
+      "$RESULT_FILE" > "${RESULT_FILE}.tmp" \
+      && mv "${RESULT_FILE}.tmp" "$RESULT_FILE"
+  else
+    jq '.project.needs_fetch = true' "$RESULT_FILE" > "${RESULT_FILE}.tmp" \
+      && mv "${RESULT_FILE}.tmp" "$RESULT_FILE"
+  fi
+else
+  jq '.project.needs_fetch = true' "$RESULT_FILE" > "${RESULT_FILE}.tmp" \
+    && mv "${RESULT_FILE}.tmp" "$RESULT_FILE"
+fi
 
 # ── 9. Check .gitignore ──────────────────────────────────────────────
-gitignore_path = os.path.join(project_dir, ".gitignore")
-has_gxv_entry = False
+GITIGNORE="$PROJECT_DIR/.gitignore"
+HAS_GXV_ENTRY=false
+if [ -f "$GITIGNORE" ]; then
+  while IFS= read -r line; do
+    stripped="${line#"${line%%[![:space:]]*}"}"
+    stripped="${stripped%"${stripped##*[![:space:]]}"}"
+    if [ "$stripped" = ".gxv/" ] || [ "$stripped" = ".gxv" ]; then
+      HAS_GXV_ENTRY=true
+      break
+    fi
+  done < "$GITIGNORE"
+fi
 
-if os.path.exists(gitignore_path):
-    with open(gitignore_path) as f:
-        gitignore_content = f.read()
-    # Check if .gxv/ is already listed (with or without comment)
-    for line in gitignore_content.splitlines():
-        stripped = line.strip()
-        if stripped == ".gxv/" or stripped == ".gxv":
-            has_gxv_entry = True
-            break
-else:
-    gitignore_content = ""
-
-if not has_gxv_entry:
-    with open(gitignore_path, "a") as f:
-        if gitignore_content and not gitignore_content.endswith("\n"):
-            f.write("\n")
-        f.write("\n# GolemXV session directory (local, not committed)\n.gxv/\n")
-    result["gitignore"]["updated"] = True
+if ! $HAS_GXV_ENTRY; then
+  # Ensure file ends with newline before appending
+  if [ -f "$GITIGNORE" ]; then
+    # Check if file ends with newline
+    if [ -s "$GITIGNORE" ] && [ "$(tail -c 1 "$GITIGNORE" | wc -l)" -eq 0 ]; then
+      echo "" >> "$GITIGNORE"
+    fi
+  fi
+  echo "" >> "$GITIGNORE"
+  echo "# GolemXV session directory (local, not committed)" >> "$GITIGNORE"
+  echo ".gxv/" >> "$GITIGNORE"
+  jq '.gitignore.updated = true' "$RESULT_FILE" > "${RESULT_FILE}.tmp" \
+    && mv "${RESULT_FILE}.tmp" "$RESULT_FILE"
+fi
 
 # ── 10. Check .mcp.json ──────────────────────────────────────────────
-mcp_json_path = os.path.join(project_dir, ".mcp.json")
-golemxv_entry = {
-    "type": "http",
-    "url": mcp_url,
-    "headers": {
-        "X-API-Key": "${GXV_API_KEY}"
-    }
-}
+MCP_JSON="$PROJECT_DIR/.mcp.json"
+GOLEMXV_ENTRY=$(jq -n --arg url "$MCP_URL" '{
+  type: "http",
+  url: $url,
+  headers: {
+    "X-API-Key": "${GXV_API_KEY}"
+  }
+}')
 
-if os.path.exists(mcp_json_path):
-    result["mcp_json"]["existed"] = True
-    try:
-        with open(mcp_json_path) as f:
-            mcp_data = json.load(f)
-        servers = mcp_data.get("mcpServers", {})
-        if "golemxv" in servers:
-            result["mcp_json"]["has_golemxv"] = True
-        else:
-            # Add golemxv entry, preserving existing servers
-            if "mcpServers" not in mcp_data:
-                mcp_data["mcpServers"] = {}
-            mcp_data["mcpServers"]["golemxv"] = golemxv_entry
-            # Atomic write
-            tmp_path = mcp_json_path + ".tmp"
-            with open(tmp_path, "w") as f:
-                json.dump(mcp_data, f, indent=2)
-                f.write("\n")
-            os.replace(tmp_path, mcp_json_path)
-            result["mcp_json"]["has_golemxv"] = True
-            result["mcp_json"]["updated"] = True
-    except (json.JSONDecodeError, IOError) as e:
-        print(f"Warning: Could not parse .mcp.json: {e}", file=sys.stderr)
-else:
-    # Create .mcp.json
-    mcp_data = {
-        "mcpServers": {
-            "golemxv": golemxv_entry
-        }
+if [ -f "$MCP_JSON" ]; then
+  jq '.mcp_json.existed = true' "$RESULT_FILE" > "${RESULT_FILE}.tmp" \
+    && mv "${RESULT_FILE}.tmp" "$RESULT_FILE"
+
+  if jq empty "$MCP_JSON" 2>/dev/null; then
+    HAS_GOLEMXV=$(jq '.mcpServers.golemxv != null' "$MCP_JSON")
+    if [ "$HAS_GOLEMXV" = "true" ]; then
+      jq '.mcp_json.has_golemxv = true' "$RESULT_FILE" > "${RESULT_FILE}.tmp" \
+        && mv "${RESULT_FILE}.tmp" "$RESULT_FILE"
+    else
+      # Add golemxv entry, preserving existing servers
+      jq --argjson entry "$GOLEMXV_ENTRY" \
+        '.mcpServers.golemxv = $entry' "$MCP_JSON" > "${MCP_JSON}.tmp" \
+        && mv "${MCP_JSON}.tmp" "$MCP_JSON"
+      jq '.mcp_json.has_golemxv = true | .mcp_json.updated = true' "$RESULT_FILE" > "${RESULT_FILE}.tmp" \
+        && mv "${RESULT_FILE}.tmp" "$RESULT_FILE"
+    fi
+  else
+    echo "Warning: Could not parse .mcp.json" >&2
+  fi
+else
+  # Create .mcp.json
+  jq -n --argjson entry "$GOLEMXV_ENTRY" '{
+    mcpServers: {
+      golemxv: $entry
     }
-    tmp_path = mcp_json_path + ".tmp"
-    with open(tmp_path, "w") as f:
-        json.dump(mcp_data, f, indent=2)
-        f.write("\n")
-    os.replace(tmp_path, mcp_json_path)
-    result["mcp_json"]["created"] = True
-    result["mcp_json"]["has_golemxv"] = True
+  }' > "${MCP_JSON}.tmp" && mv "${MCP_JSON}.tmp" "$MCP_JSON"
+  jq '.mcp_json.created = true | .mcp_json.has_golemxv = true' "$RESULT_FILE" > "${RESULT_FILE}.tmp" \
+    && mv "${RESULT_FILE}.tmp" "$RESULT_FILE"
+fi
 
 # ── 11. Detect heartbeat script path ─────────────────────────────────
-heartbeat_candidates = []
+HEARTBEAT=""
+CANDIDATES=()
 
-# Check CLAUDE_PLUGIN_ROOT first (set by Claude Code for plugin hooks/scripts)
-plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT", "")
-if plugin_root:
-    heartbeat_candidates.append(os.path.join(plugin_root, "scripts", "heartbeat.sh"))
+# Check CLAUDE_PLUGIN_ROOT first
+if [ -n "${CLAUDE_PLUGIN_ROOT:-}" ]; then
+  CANDIDATES+=("${CLAUDE_PLUGIN_ROOT}/scripts/heartbeat.sh")
+fi
 
 # Plugin installation path
-home = os.environ.get("HOME", "")
-if home:
-    heartbeat_candidates.append(os.path.join(home, ".claude", "plugins", "gxv-skills", "scripts", "heartbeat.sh"))
+if [ -n "${HOME:-}" ]; then
+  CANDIDATES+=("${HOME}/.claude/plugins/gxv-skills/scripts/heartbeat.sh")
+fi
 
-# Submodule path (relative to project dir)
-heartbeat_candidates.append(os.path.join(project_dir, "gxv-skills", "scripts", "heartbeat.sh"))
+# Submodule path
+CANDIDATES+=("${PROJECT_DIR}/gxv-skills/scripts/heartbeat.sh")
 
-for candidate in heartbeat_candidates:
-    if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-        result["heartbeat_script"] = candidate
-        break
+for CANDIDATE in "${CANDIDATES[@]}"; do
+  if [ -f "$CANDIDATE" ] && [ -x "$CANDIDATE" ]; then
+    HEARTBEAT="$CANDIDATE"
+    break
+  fi
+done
 
-# If none found, report the candidates checked
-if result["heartbeat_script"] is None:
-    print(f"Warning: heartbeat.sh not found. Checked: {heartbeat_candidates}", file=sys.stderr)
+if [ -n "$HEARTBEAT" ]; then
+  jq --arg hb "$HEARTBEAT" '.heartbeat_script = $hb' "$RESULT_FILE" > "${RESULT_FILE}.tmp" \
+    && mv "${RESULT_FILE}.tmp" "$RESULT_FILE"
+else
+  echo "Warning: heartbeat.sh not found. Checked: ${CANDIDATES[*]}" >&2
+fi
 
 # ── Output ────────────────────────────────────────────────────────────
-json.dump(result, sys.stdout, indent=2)
-print()
-PYEOF
+cat "$RESULT_FILE"

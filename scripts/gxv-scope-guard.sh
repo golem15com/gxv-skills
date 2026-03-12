@@ -29,151 +29,125 @@ GXV_DIR="$PROJECT_DIR/.gxv"
 # Fast-path: no .gxv directory → not using GolemXV
 [ -d "$GXV_DIR" ] || exit 0
 
-# Delegate to python3 for all logic
-echo "$INPUT" | python3 -c "
-import json, os, sys, glob
-from datetime import datetime, timezone
+# Extract file_path from hook input
+FILE_PATH=$(echo "$INPUT" | jq -r '.tool_input.file_path // ""' 2>/dev/null) || true
+[ -n "$FILE_PATH" ] || exit 0
 
-project_dir = '$PROJECT_DIR'
-gxv_dir = '$GXV_DIR'
+# Normalize to project-relative path
+ABS_PROJECT=$(cd "$PROJECT_DIR" && pwd -P)
+if [[ "$FILE_PATH" = /* ]]; then
+  ABS_FILE=$(cd "$(dirname "$FILE_PATH")" 2>/dev/null && echo "$(pwd -P)/$(basename "$FILE_PATH")") || exit 0
+else
+  ABS_FILE=$(cd "$(dirname "$ABS_PROJECT/$FILE_PATH")" 2>/dev/null && echo "$(pwd -P)/$(basename "$FILE_PATH")") || exit 0
+fi
 
-# ── Parse hook input ──────────────────────────────────────────────
-try:
-    hook_input = json.load(sys.stdin)
-except (json.JSONDecodeError, IOError):
-    sys.exit(0)  # Can't parse → allow
+# File outside project → allow
+[[ "$ABS_FILE" = "$ABS_PROJECT/"* ]] || exit 0
+REL_PATH="${ABS_FILE#$ABS_PROJECT/}"
 
-tool_input = hook_input.get('tool_input', {})
-file_path = tool_input.get('file_path', '')
+# Find own session and agent name
+OWN_AGENT=""
+for SF in "$GXV_DIR"/session-*.json; do
+  [ -f "$SF" ] || continue
+  OWN_AGENT=$(jq -r '.agent_name // ""' "$SF" 2>/dev/null) || true
+  [ -n "$OWN_AGENT" ] && break
+done
+[ -n "$OWN_AGENT" ] || exit 0
 
-if not file_path:
-    sys.exit(0)  # No file path → allow
+# Find most recent presence file
+PRESENCE_FILE=""
+NEWEST_MTIME=0
+for f in "$GXV_DIR"/presence-*.json; do
+  [ -f "$f" ] || continue
+  MTIME=$(stat -c %Y "$f" 2>/dev/null) || continue
+  if [ "$MTIME" -gt "$NEWEST_MTIME" ]; then
+    NEWEST_MTIME="$MTIME"
+    PRESENCE_FILE="$f"
+  fi
+done
+[ -n "$PRESENCE_FILE" ] || exit 0
 
-# ── Normalize to project-relative path ────────────────────────────
-abs_project = os.path.realpath(project_dir)
-abs_file = os.path.realpath(file_path) if os.path.isabs(file_path) else os.path.realpath(os.path.join(abs_project, file_path))
+# Check staleness and find conflicts using jq
+CONFLICT_RESULT=$(jq -r --arg own_agent "$OWN_AGENT" --arg rel_path "$REL_PATH" '
+  # Check staleness (>2 minutes old → allow)
+  (.last_polled_at // "") as $ts |
+  if $ts == "" then "ALLOW"
+  else
+    ($ts | sub("Z$"; "+00:00") | try fromdateiso8601 catch 0) as $polled |
+    if $polled == 0 then "ALLOW"
+    elif (now - $polled) > 120 then "ALLOW"
+    else
+      # Check for conflicts
+      [.agents // [] | .[] |
+        select(.agent_name != $own_agent and .agent_name != "") |
+        .agent_name as $name |
+        .declared_area as $area |
+        (.declared_files // []) as $files |
 
-if abs_file.startswith(abs_project + '/'):
-    rel_path = abs_file[len(abs_project) + 1:]
-else:
-    sys.exit(0)  # File outside project → allow (not our concern)
+        # Area match
+        if $area != "" and ($rel_path | startswith($area + "/") or $rel_path == $area) then
+          "\($name)|area: \($area)"
+        else
+          # Files match
+          ([$files[] |
+            gsub("[*]+$"; "") | gsub("/+$"; "") |
+            select(. != "") |
+            select($rel_path | startswith(. + "/") or $rel_path == . or startswith(.))
+          ] | first // null) as $match |
+          if $match != null then "\($name)|file: \($match)"
+          else empty
+          end
+        end
+      ] | if length > 0 then .[0] else "ALLOW" end
+    end
+  end
+' "$PRESENCE_FILE" 2>/dev/null) || true
 
-# ── Find own session ──────────────────────────────────────────────
-session_files = glob.glob(os.path.join(gxv_dir, 'session-*.json'))
-if not session_files:
-    sys.exit(0)  # No session → not checked in → allow
+# No conflict or error → allow
+[ -n "$CONFLICT_RESULT" ] && [ "$CONFLICT_RESULT" != "ALLOW" ] || exit 0
 
-# Read own agent name from session file(s)
-own_agent = ''
-for sf in session_files:
-    try:
-        with open(sf) as f:
-            sd = json.load(f)
-        own_agent = sd.get('agent_name', '')
-        if own_agent:
-            break
-    except (json.JSONDecodeError, IOError):
-        continue
+# Parse conflict result: "agent_name|reason"
+CONFLICT_AGENT="${CONFLICT_RESULT%%|*}"
+CONFLICT_REASON="${CONFLICT_RESULT#*|}"
 
-if not own_agent:
-    sys.exit(0)  # Can't determine own identity → allow
+# Read conflict_mode from GOLEM.yaml (default: warn)
+CONFLICT_MODE="warn"
+GOLEM_YAML="$PROJECT_DIR/GOLEM.yaml"
+if [ -f "$GOLEM_YAML" ]; then
+  # Simple YAML parsing: look for coordination.conflict_mode
+  IN_COORDINATION=false
+  while IFS= read -r line; do
+    stripped="${line#"${line%%[![:space:]]*}"}"
+    if [[ "$stripped" = coordination:* ]]; then
+      IN_COORDINATION=true
+      continue
+    fi
+    if $IN_COORDINATION && [[ "$line" != " "* ]] && [[ "$line" != "	"* ]] && [ -n "$stripped" ]; then
+      IN_COORDINATION=false
+    fi
+    if $IN_COORDINATION && [[ "$stripped" = conflict_mode:* ]]; then
+      CONFLICT_MODE="${stripped#conflict_mode:}"
+      CONFLICT_MODE="${CONFLICT_MODE#"${CONFLICT_MODE%%[![:space:]]*}"}"
+      CONFLICT_MODE="${CONFLICT_MODE%"${CONFLICT_MODE##*[![:space:]]}"}"
+      CONFLICT_MODE="${CONFLICT_MODE//\'/}"
+      CONFLICT_MODE="${CONFLICT_MODE//\"/}"
+      break
+    fi
+  done < "$GOLEM_YAML"
+fi
 
-# ── Load presence cache ───────────────────────────────────────────
-presence_files = glob.glob(os.path.join(gxv_dir, 'presence-*.json'))
-if not presence_files:
-    sys.exit(0)  # No presence data → allow
+# Act on conflict
+if [ "$CONFLICT_MODE" = "enforce" ]; then
+  BASENAME=$(basename "$REL_PATH")
+  REASON="SCOPE CONFLICT: ${REL_PATH} is in ${CONFLICT_AGENT}'s scope (${CONFLICT_REASON}).
+Coordinate first: /gxv:msg --to ${CONFLICT_AGENT} \"Can I edit ${BASENAME}?\""
 
-# Use most recently modified
-presence_files.sort(key=lambda f: os.path.getmtime(f), reverse=True)
-try:
-    with open(presence_files[0]) as f:
-        presence = json.load(f)
-except (json.JSONDecodeError, IOError):
-    sys.exit(0)  # Can't read → allow
-
-# Check staleness (>2 minutes old → don't block on stale data)
-polled_at = presence.get('last_polled_at', '')
-if polled_at:
-    try:
-        polled_dt = datetime.fromisoformat(polled_at.replace('Z', '+00:00'))
-        age = (datetime.now(timezone.utc) - polled_dt).total_seconds()
-        if age > 120:
-            sys.exit(0)  # Stale cache → allow
-    except (ValueError, TypeError):
-        sys.exit(0)  # Bad timestamp → allow
-else:
-    sys.exit(0)  # No timestamp → allow
-
-# ── Check for conflicts ──────────────────────────────────────────
-agents = presence.get('agents', [])
-conflict_agent = None
-conflict_reason = ''
-
-for a in agents:
-    name = a.get('agent_name', '')
-    if name == own_agent or not name:
-        continue
-
-    area = a.get('declared_area', '')
-    files = a.get('declared_files') or []
-
-    # Area match: rel_path starts with declared_area/
-    if area and (rel_path.startswith(area + '/') or rel_path == area):
-        conflict_agent = name
-        conflict_reason = f'area: {area}'
-        break
-
-    # Files match: any declared file is a prefix of rel_path
-    for df in files:
-        # Handle glob-style patterns: strip trailing ** or *
-        df_clean = df.rstrip('*').rstrip('/')
-        if df_clean and (rel_path.startswith(df_clean + '/') or rel_path == df_clean or rel_path.startswith(df_clean)):
-            conflict_agent = name
-            conflict_reason = f'file: {df}'
-            break
-    if conflict_agent:
-        break
-
-if not conflict_agent:
-    sys.exit(0)  # No conflict → allow
-
-# ── Read conflict_mode from GOLEM.yaml ────────────────────────────
-conflict_mode = 'warn'  # default
-golem_path = os.path.join(project_dir, 'GOLEM.yaml')
-if os.path.exists(golem_path):
-    try:
-        with open(golem_path) as f:
-            content = f.read()
-        in_coordination = False
-        for line in content.splitlines():
-            stripped = line.strip()
-            if stripped.startswith('coordination:'):
-                in_coordination = True
-                continue
-            if in_coordination and not line.startswith(' ') and not line.startswith('\t') and stripped:
-                in_coordination = False
-            if in_coordination and stripped.startswith('conflict_mode:'):
-                conflict_mode = stripped.split(':', 1)[1].strip().strip(\"'\\\"\" )
-                break
-    except IOError:
-        pass
-
-# ── Act on conflict ───────────────────────────────────────────────
-if conflict_mode == 'enforce':
-    reason = (
-        f'SCOPE CONFLICT: {rel_path} is in {conflict_agent}\\'s scope ({conflict_reason}).\\n'
-        f'Coordinate first: /gxv:msg --to {conflict_agent} \"Can I edit {os.path.basename(rel_path)}?\"'
-    )
-    result = {
-        'hookSpecificOutput': {
-            'hookEventName': 'PreToolUse',
-            'permissionDecision': 'deny',
-            'permissionDecisionReason': reason,
-        }
+  jq -n --arg reason "$REASON" '{
+    hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      permissionDecision: "deny",
+      permissionDecisionReason: $reason
     }
-    json.dump(result, sys.stdout)
-    print()
-else:
-    # warn mode (or unknown) → allow, context hook shows scopes
-    sys.exit(0)
-" 2>/dev/null || true
+  }'
+fi
+# warn mode (or unknown) → allow (exit 0)

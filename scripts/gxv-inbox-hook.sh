@@ -20,132 +20,125 @@ GXV_DIR="$PROJECT_DIR/.gxv"
 # Fast-path: no .gxv directory → nothing to do
 [ -d "$GXV_DIR" ] || exit 0
 
-# Use python3 for all file reads and output formatting
-python3 -c "
-import json, os, sys, glob
-from datetime import datetime, timezone
-
-gxv_dir = '$GXV_DIR'
-output_lines = []
+OUTPUT=""
 
 # ── 1. Scope summary from presence cache ──────────────────────────
-presence_pattern = os.path.join(gxv_dir, 'presence-*.json')
-presence_files = glob.glob(presence_pattern)
+# Find most recently modified presence file
+PRESENCE_FILE=""
+NEWEST_MTIME=0
+SELF_AGENT=""
 
-self_agent = ''
-scope_parts = []
+for f in "$GXV_DIR"/presence-*.json; do
+  [ -f "$f" ] || continue
+  # Use stat to get mtime (portable across Linux/Alpine)
+  MTIME=$(stat -c %Y "$f" 2>/dev/null) || continue
+  if [ "$MTIME" -gt "$NEWEST_MTIME" ]; then
+    NEWEST_MTIME="$MTIME"
+    PRESENCE_FILE="$f"
+  fi
+done
 
-if presence_files:
-    # Use most recently modified presence file
-    presence_files.sort(key=lambda f: os.path.getmtime(f), reverse=True)
-    try:
-        with open(presence_files[0]) as f:
-            presence = json.load(f)
+if [ -n "$PRESENCE_FILE" ]; then
+  # Check staleness and extract scope info with jq
+  SCOPE_LINE=$(jq -r '
+    def age_ok:
+      (.last_polled_at // "") as $ts |
+      if $ts == "" then false
+      else
+        ($ts | sub("Z$"; "+00:00") | try fromdateiso8601 catch 0) as $polled |
+        if $polled == 0 then false
+        else (now - $polled) < 120
+        end
+      end;
 
-        # Check staleness — skip if older than 2 minutes
-        polled_at = presence.get('last_polled_at', '')
-        self_agent = presence.get('self', '')
-        stale = False
-        if polled_at:
-            try:
-                polled_dt = datetime.fromisoformat(polled_at.replace('Z', '+00:00'))
-                age = (datetime.now(timezone.utc) - polled_dt).total_seconds()
-                if age > 120:
-                    stale = True
-            except (ValueError, TypeError):
-                stale = True
+    if age_ok then
+      .self as $self |
+      [.agents[] |
+        .agent_name as $name |
+        .declared_area as $area |
+        if $name == $self then "\($name)(YOU)->\($area // "(none)")"
+        else "\($name)->\($area // "(none)")"
+        end
+      ] | if length > 0 then "[GXV] Scopes: \(join(", "))" else "" end
+    else ""
+    end
+  ' "$PRESENCE_FILE" 2>/dev/null) || true
 
-        if not stale:
-            agents = presence.get('agents', [])
-            for a in agents:
-                name = a.get('agent_name', '?')
-                area = a.get('declared_area', '')
-                if name == self_agent:
-                    scope_parts.append(f'{name}(YOU)->{area or \"(none)\"}')
-                else:
-                    scope_parts.append(f'{name}->{area or \"(none)\"}')
+  SELF_AGENT=$(jq -r '.self // ""' "$PRESENCE_FILE" 2>/dev/null) || true
 
-            if scope_parts:
-                output_lines.append(f'[GXV] Scopes: {', '.join(scope_parts)}')
-    except (json.JSONDecodeError, IOError, KeyError):
-        pass
+  if [ -n "$SCOPE_LINE" ]; then
+    OUTPUT="$SCOPE_LINE"
+  fi
+fi
 
 # ── 2. Unread messages from inbox files ───────────────────────────
-inbox_pattern = os.path.join(gxv_dir, 'inbox-*.json')
-inbox_files = glob.glob(inbox_pattern)
+UNREAD_OUTPUT=""
+for INBOX_FILE in "$GXV_DIR"/inbox-*.json; do
+  [ -f "$INBOX_FILE" ] || continue
 
-unread = []
-agent_name = self_agent  # prefer presence-derived agent name
+  # Extract unread messages and format them, also get the agent_name
+  RESULT=$(jq -r --arg self_agent "$SELF_AGENT" '
+    (.agent_name // "") as $file_agent |
+    (if $self_agent != "" then $self_agent elif $file_agent != "" then $file_agent else "" end) as $agent |
+    (.last_seen_at // "") as $last_seen |
 
-for inbox_file in inbox_files:
-    try:
-        with open(inbox_file) as f:
-            data = json.load(f)
-    except (json.JSONDecodeError, IOError):
-        continue
+    # Filter messages: only broadcasts and DMs to/from this agent
+    [.messages // [] | .[] |
+      select(
+        ($agent == "") or
+        (.recipient // "broadcast") == "broadcast" or
+        (.recipient_type // "") == "broadcast" or
+        (.recipient // "") == $agent or
+        (.recipient_name // "") == $agent or
+        (.sender // "") == $agent
+      ) |
+      select($last_seen == "" or (.created_at // "") > $last_seen)
+    ] |
+    sort_by(.created_at // "") |
 
-    file_agent = data.get('agent_name', '')
-    if file_agent and not agent_name:
-        agent_name = file_agent
+    if length > 0 then
+      . as $msgs |
+      (["\(length)"] +
+       [$msgs[] |
+        (.created_at // "") as $created |
+        (if ($created | length) >= 16 then $created[11:16] else "??:??" end) as $time |
+        (.sender // "unknown") as $sender |
+        (.recipient // "broadcast") as $recipient |
+        (.content // "") as $content |
+        if $recipient == "broadcast" or $recipient == "" then
+          "  [\($time)] \($sender) (broadcast): \($content)"
+        elif $agent != "" and ($recipient == $agent or (.recipient_name // "") == $agent) then
+          "  [\($time)] \($sender) -> YOU: \($content)"
+        else
+          "  [\($time)] \($sender) -> \($recipient): \($content)"
+        end
+       ]) | join("\n")
+    else ""
+    end
+  ' "$INBOX_FILE" 2>/dev/null) || true
 
-    last_seen = data.get('last_seen_at', '')
-    messages = data.get('messages', [])
+  if [ -n "$RESULT" ]; then
+    # First line is the count, rest are formatted messages
+    COUNT=$(echo "$RESULT" | head -1)
+    MSGS=$(echo "$RESULT" | tail -n +2)
 
-    # Defense-in-depth: filter out DMs between other agents
-    if agent_name:
-        messages = [m for m in messages
-            if m.get('recipient', 'broadcast') == 'broadcast'
-            or m.get('recipient_type', '') == 'broadcast'
-            or m.get('recipient', '') == agent_name
-            or m.get('recipient_name', '') == agent_name
-            or m.get('sender', '') == agent_name]
+    if [ -n "$MSGS" ]; then
+      UNREAD_OUTPUT="${UNREAD_OUTPUT}[GolemXV] ${COUNT} new message(s):\n\n${MSGS}\n\nReply: /gxv:msg \"your reply\" | DM: /gxv:msg --to agent-name \"message\""
 
-    file_unread = []
-    for msg in messages:
-        created = msg.get('created_at', '')
-        if not last_seen or created > last_seen:
-            file_unread.append(msg)
-
-    if not file_unread:
-        continue
-
-    unread.extend(file_unread)
-
-    # Update last_seen_at to now
-    now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
-    data['last_seen_at'] = now
-    tmp = inbox_file + '.tmp'
-    try:
-        with open(tmp, 'w') as f:
-            json.dump(data, f, indent=2)
-        os.replace(tmp, inbox_file)
-    except IOError:
-        pass
-
-if unread:
-    unread.sort(key=lambda m: m.get('created_at', ''))
-    count = len(unread)
-    output_lines.append(f'[GolemXV] {count} new message(s):')
-    output_lines.append('')
-
-    for msg in unread:
-        created = msg.get('created_at', '')
-        time_str = created[11:16] if len(created) >= 16 else '??:??'
-        sender = msg.get('sender', 'unknown')
-        recipient = msg.get('recipient', 'broadcast')
-        content = msg.get('content', '')
-
-        if recipient == 'broadcast' or not recipient:
-            output_lines.append(f'  [{time_str}] {sender} (broadcast): {content}')
-        elif agent_name and (recipient == agent_name or msg.get('recipient_name', '') == agent_name):
-            output_lines.append(f'  [{time_str}] {sender} -> YOU: {content}')
-        else:
-            output_lines.append(f'  [{time_str}] {sender} -> {recipient}: {content}')
-
-    output_lines.append('')
-    output_lines.append('Reply: /gxv:msg \"your reply\" | DM: /gxv:msg --to agent-name \"message\"')
+      # Update last_seen_at to now
+      NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+      jq --arg now "$NOW" '.last_seen_at = $now' "$INBOX_FILE" > "${INBOX_FILE}.tmp" 2>/dev/null \
+        && mv "${INBOX_FILE}.tmp" "$INBOX_FILE" || true
+    fi
+  fi
+done
 
 # ── Output ────────────────────────────────────────────────────────
-if output_lines:
-    print('\n'.join(output_lines))
-" 2>/dev/null || true
+if [ -n "$OUTPUT" ] && [ -n "$UNREAD_OUTPUT" ]; then
+  echo "$OUTPUT"
+  echo -e "$UNREAD_OUTPUT"
+elif [ -n "$OUTPUT" ]; then
+  echo "$OUTPUT"
+elif [ -n "$UNREAD_OUTPUT" ]; then
+  echo -e "$UNREAD_OUTPUT"
+fi
